@@ -15,9 +15,14 @@
 >
 > Build/install: `xcodegen generate` → `xcodebuild -scheme Strand -configuration Release
 > CODE_SIGN_IDENTITY="-"` → **`ditto` the product over `/Applications/NOOP.app`; NEVER re-sign it**
-> (a bare `codesign --force --sign -` strips the sandbox). History (why this fork, the v1.61→v9
-> migration trail, the WHOOP-4.0 RTC/staging quirks) lives in the archived repo `~/Projects/NOOP`
-> (`workspace/state.md`) and in Claude's project memory under that path.
+> (a bare `codesign --force --sign -` strips the sandbox).
+>
+> Git remotes on this machine: `origin` → `ryanbr/noop` (read-only upstream — pull releases and
+> rebase these patches on top), `personal` → private `imrankhanfyi/iknoop-v9` (off-machine backup;
+> `local/no-network` tracks it, so a plain `git push` lands there). **Source only — biometric data
+> never goes to any git remote.** History (why this fork, the v1.61→v9 migration trail, the
+> WHOOP-4.0 RTC/staging quirks) lives in the archived repo `~/Projects/NOOP` (`workspace/state.md`)
+> and in Claude's project memory under that path.
 
 Guidance for anyone (human or AI agent) submitting a pull request. This is the high-signal map;
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) is the full guide (BLE safety contract, design-system
