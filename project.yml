@@ -115,11 +115,11 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.device.bluetooth: true
         com.apple.security.files.user-selected.read-write: true
-        # Outbound client access — used ONLY by the opt-in, consent-gated, BYOK AI Coach.
-        # The ad-hoc distributed build applies NO entitlements (unsigned build + ad-hoc
-        # re-sign), so this matters only for a SIGNED/sandboxed build (where the sandbox
-        # otherwise blocks the Coach's request — #128). Data path stays network-free.
-        com.apple.security.network.client: true
+        # LOCAL PATCH (local/no-network): upstream declares com.apple.security.network.client
+        # here for the opt-in BYOK AI Coach / Oura cloud / update check. We remove it so the OS
+        # sandbox hard-blocks ALL egress — zero-trust guarantee that no biometric data can leave
+        # this machine. To re-enable a network feature later: audit its consent path first, then
+        # restore the entitlement in this block. Rebase this commit when pulling upstream.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop.staging
