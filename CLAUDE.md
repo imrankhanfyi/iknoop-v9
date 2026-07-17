@@ -1,5 +1,24 @@
 # CLAUDE.md — working on NOOP
 
+> **⚠️ LOCAL FORK NOTE (Imran's machine, 2026-07-17) — read before building or pulling upstream.**
+> This checkout is Imran's personal daily driver, not a stock clone. `/Applications/NOOP.app` is built
+> from the **`local/no-network`** branch, which sits on the v9.0.1 tag and carries **two permanent
+> local patches that must survive an upstream pull** (rebase them, never drop them):
+> 1. **Strip `com.apple.security.network.client`** from `project.yml` (+ the xcodegen-regenerated
+>    `Strand/Resources/Strand.entitlements`) — the OS sandbox then hard-blocks *all* egress, restoring
+>    a zero-network guarantee. Re-enable per-feature only after auditing that feature's consent path.
+> 2. **Production identity** `PRODUCT_BUNDLE_IDENTIFIER com.noopapp.noop` / `PRODUCT_NAME NOOP` in
+>    `project.yml` — upstream ships this fork as "NOOP Staging" (`com.noopapp.noop.staging`) so it
+>    installs beside the official app. Our build IS the primary install and must adopt the existing
+>    `com.noopapp.noop` sandbox container. (Check out the first patch commit alone to build a staging
+>    variant with a separate container — used for migration rehearsals.)
+>
+> Build/install: `xcodegen generate` → `xcodebuild -scheme Strand -configuration Release
+> CODE_SIGN_IDENTITY="-"` → **`ditto` the product over `/Applications/NOOP.app`; NEVER re-sign it**
+> (a bare `codesign --force --sign -` strips the sandbox). History (why this fork, the v1.61→v9
+> migration trail, the WHOOP-4.0 RTC/staging quirks) lives in the archived repo `~/Projects/NOOP`
+> (`workspace/state.md`) and in Claude's project memory under that path.
+
 Guidance for anyone (human or AI agent) submitting a pull request. This is the high-signal map;
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) is the full guide (BLE safety contract, design-system
 rules, add-a-metric/screen/command recipes), [`docs/BUILD.md`](docs/BUILD.md) covers signing/pairing,
