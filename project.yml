@@ -122,8 +122,12 @@ targets:
         # restore the entitlement in this block. Rebase this commit when pulling upstream.
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop.staging
-        PRODUCT_NAME: "NOOP Staging"
+        # LOCAL PATCH (local/no-network): production identity — this personal build replaces
+        # /Applications/NOOP.app and must adopt the existing com.noopapp.noop sandbox container.
+        # (Upstream ships the fork under the ".staging" identity so it installs beside the
+        # official app; check out the previous commit to build a staging variant.)
+        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop
+        PRODUCT_NAME: "NOOP"
         # Pin the Swift module name so `@testable import Strand` resolves even though PRODUCT_NAME is
         # NOOP — the test target and shared sources refer to the app module as `Strand`.
         PRODUCT_MODULE_NAME: Strand
@@ -164,7 +168,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.strandtests
         # Host the unit tests in the app so `@testable import Strand` links against the real app module.
         # NOTE: must track the app target's PRODUCT_NAME ("NOOP Staging" since the staging rename).
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/NOOP Staging.app/Contents/MacOS/NOOP Staging"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/NOOP.app/Contents/MacOS/NOOP"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
   # ---------------------------------------------------------------------------
