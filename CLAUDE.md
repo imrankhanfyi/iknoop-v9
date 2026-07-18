@@ -21,8 +21,9 @@
 > rebase these patches on top), `personal` → private `imrankhanfyi/iknoop-v9` (off-machine backup;
 > `local/no-network` tracks it, so a plain `git push` lands there). **Source only — biometric data
 > never goes to any git remote.** History (why this fork, the v1.61→v9 migration trail, the
-> WHOOP-4.0 RTC/staging quirks) lives in the archived repo `~/Projects/NOOP` (`workspace/state.md`)
-> and in Claude's project memory under that path.
+> WHOOP-4.0 RTC/staging quirks) lives in the archived repo `~/Projects/NOOP-archive/repo-v1.61`
+> (`workspace/state.md`). Ongoing work-state for *this* repo lives in `workspace/state.md` here, and in
+> Claude's project memory (keyed to `~/Projects/NOOP` — now this repo, after the 2026-07-18 folder cleanup).
 
 Guidance for anyone (human or AI agent) submitting a pull request. This is the high-signal map;
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) is the full guide (BLE safety contract, design-system
