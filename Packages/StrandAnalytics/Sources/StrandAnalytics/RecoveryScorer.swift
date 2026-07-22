@@ -116,6 +116,28 @@ public enum RecoveryScorer {
     /// candidacy; if it were allowed to win, resting HR would read a fabricated sub-physiological value.
     public static let restingHRMinPlausibleBpm: Double = 25.0
 
+    /// Night-relative RR-density gate fraction. A 5-min bin may only WIN the resting floor if its
+    /// beat detection is corroborated by RR-interval density ≥ this fraction of the night's MEDIAN
+    /// qualifying-bin density. When the optical sensor loses contact (strap loosened/shifted, usually
+    /// in early-morning sleep) the beat detector collapses and emits erratic, depressed HR while RR
+    /// intervals stop being logged; such a bin's RR density sits far below the night's median and is
+    /// barred from winning — so a full bin of collapse noise can no longer be stored as the night's
+    /// resting HR. Empirical basis (WHOOP 4.0, one user, 9 nights, 8 healthy): healthy nights' winning
+    /// bin sat at 0.67–1.05× median, the two artifact bins at 0.03× — a wide bimodal gap; 0.4 is near
+    /// gap-center, biased slightly low so a false-REJECT (reads RHR too high) is preferred over a
+    /// false-ACCEPT (reads it too low, the worse-feeling error). UNDER-CONSTRAINED — revisit as more
+    /// straps/nights accumulate; must move Swift AND Kotlin together (parity contract). See
+    /// docs/superpowers/specs/2026-07-22-resting-hr-rr-density-gate-design.md.
+    public static let restingHRGateFrac: Double = 0.4
+
+    /// Absolute floor on the night's MEDIAN qualifying-bin RR density below which the RR-density gate
+    /// is INACTIVE (behavior falls back to the ungated #686 floor). When RR is globally absent/sparse
+    /// (RR stream off, imported CSV) there is no reliable per-night reference to gate against, and the
+    /// relative ratio would be noise. Set conservatively pending real RR-poor data — all local probe
+    /// nights had ample RR (median 0.86–2.45), so this floor is not yet data-backed; every fallback is
+    /// logged so genuinely RR-poor nights surface the right value. Must move Swift AND Kotlin together.
+    public static let restingHRMinNightDensityToGate: Double = 0.1
+
     // MARK: - Resting HR
 
     /// Lowest sustained HR during the in-bed window (bpm, rounded), or nil.
@@ -131,12 +153,23 @@ public enum RecoveryScorer {
     /// 5-min bin means — only artifact bins are barred from being that minimum. If no bin
     /// qualifies (a wholly sparse/degenerate window), fall back to the lowest of ALL bin means,
     /// else the all-sample mean, preserving the never-nil-on-data behaviour.
-    public static func restingHR(_ hr: [HRSample], start: Int, end: Int) -> Int? {
+    ///
+    /// RR-density gate: when `rr` is supplied and the night logs enough RR to reason from, a bin also
+    /// has to clear a night-relative RR-density bar (≥ `restingHRGateFrac` × the night's median
+    /// qualifying-bin density) to WIN — this bars a beat-detector-collapse bin (erratic depressed HR
+    /// with RR intervals gone sparse) from becoming the stored resting HR. Passing `rr: []` (the
+    /// default) — or an RR-poor night below `restingHRMinNightDensityToGate` — leaves the gate INACTIVE
+    /// and the return value byte-identical to the pre-gate #686 estimate. `log`, when supplied, is
+    /// called with a one-line reason whenever the gate is skipped or falls back, so the RR-absent /
+    /// loose-strap gaps are visible rather than silent. See the design spec referenced on the constants.
+    public static func restingHR(_ hr: [HRSample], rr: [RRInterval] = [], start: Int, end: Int,
+                                 log: ((String) -> Void)? = nil) -> Int? {
         let seg = hr.filter { $0.ts >= start && $0.ts <= end }
         guard !seg.isEmpty else { return nil }
+        let rrSeg = rr.filter { $0.ts >= start && $0.ts <= end }
 
-        var means: [Double] = []          // every bin mean (legacy floor, the fallback)
-        var qualified: [Double] = []       // bins eligible to WIN the floor (#686)
+        var means: [Double] = []                          // every bin mean (legacy floor, the fallback)
+        var qualified: [(mean: Double, density: Double)] = []   // bins eligible to WIN the floor (#686)
         var t = start
         while t < end {
             let win = seg.filter { $0.ts >= t && $0.ts < t + restingHRWindowS }
@@ -146,22 +179,54 @@ public enum RecoveryScorer {
                 // A bin wins the floor only if it is well-populated AND physiologically plausible —
                 // a thin (single-artifact) or sub-physiological (dropout) bin can't be the minimum.
                 if win.count >= restingHRMinBinSamples && mean >= restingHRMinPlausibleBpm {
-                    qualified.append(mean)
+                    let rrCount = rrSeg.reduce(0) { $0 + (($1.ts >= t && $1.ts < t + restingHRWindowS) ? 1 : 0) }
+                    qualified.append((mean, Double(rrCount) / Double(win.count)))
                 }
             }
             t += restingHRWindowS
         }
+
         let floor: Double
-        if let m = qualified.min() {
-            floor = m
+        if !qualified.isEmpty {
+            let med = median(qualified.map { $0.density })
+            if !rrSeg.isEmpty && med >= restingHRMinNightDensityToGate {
+                // Gate ACTIVE: a bin must clear the night-relative RR-density bar to win the floor.
+                let eligible = qualified.filter { $0.density >= restingHRGateFrac * med }
+                if let m = eligible.map({ $0.mean }).min() {
+                    floor = m
+                } else {
+                    // Every qualifying bin failed the gate (majority-artifact night): fall back to the
+                    // ungated #686 floor rather than return nil, and surface it.
+                    floor = qualified.map { $0.mean }.min()!
+                    log?("restingHR: RR-density gate rejected all bins (median density \(round2(med))); using ungated floor")
+                }
+            } else {
+                // Gate INACTIVE: no RR, or the night's RR is too sparse to be a reliable reference.
+                if !rrSeg.isEmpty {
+                    log?("restingHR: RR too sparse to gate (median density \(round2(med)) < \(restingHRMinNightDensityToGate)); using ungated floor")
+                }
+                floor = qualified.map { $0.mean }.min()!
+            }
         } else if let m = means.min() {
-            // No bin cleared the artifact bar (sparse window): fall back to the legacy floor.
+            // No bin cleared the #686 artifact bar (sparse window): fall back to the legacy floor.
             floor = m
         } else {
             floor = Double(seg.reduce(0) { $0 + $1.bpm }) / Double(seg.count)
         }
         return Int(floor.rounded())
     }
+
+    /// Median of a non-empty list (even count → mean of the two middle values), matching Python
+    /// `statistics.median` used by the threshold probe. Kotlin twin must use the identical definition.
+    private static func median(_ xs: [Double]) -> Double {
+        let s = xs.sorted()
+        let n = s.count
+        guard n > 0 else { return 0 }
+        return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
+    }
+
+    /// Round to 2 decimals for log lines (no behavioral effect).
+    private static func round2(_ x: Double) -> Double { (x * 100).rounded() / 100 }
 
     // MARK: - Recovery Index (overnight HR-decline slope)
 

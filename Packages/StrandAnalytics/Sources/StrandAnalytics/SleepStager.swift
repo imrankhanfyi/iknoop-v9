@@ -951,7 +951,7 @@ public enum SleepStager {
             // Daytime false-sleep guard (#90): a window centered in the local daytime band
             // must clear a stricter bar (≥daytimeMinSleepMin AND a real resting-HR dip).
             // Overnight windows skip this entirely. restingHR is computed here (reused below).
-            let resting = sessionRestingHR(start: p.start, end: p.end, hr: hrS)
+            let resting = RecoveryScorer.restingHR(hrS, rr: rrS, start: p.start, end: p.end, log: traceSink)
             let continuesChain = chainPrevEnd.map { p.start - $0 <= continuationGapS } ?? false
             let isNightTail = continuesChain && chainFromOvernight   // the night's tail, not a nap
             // H7 (#531): when the prior accepted chain BEGAN overnight, its wake (`chainPrevEnd`) anchors the
@@ -1991,23 +1991,6 @@ public enum SleepStager {
     }
 
     // MARK: - Per-session HR / HRV
-
-    /// Lowest 5-min rolling-mean HR during the session (bpm), or nil.
-    static func sessionRestingHR(start: Int, end: Int, hr: [HRSample]) -> Int? {
-        let seg = hr.filter { $0.ts >= start && $0.ts <= end }
-        guard !seg.isEmpty else { return nil }
-        let windowS = 5 * 60
-        var means: [Double] = []
-        var t = start
-        while t < end {
-            let win = seg.filter { $0.ts >= t && $0.ts < t + windowS }
-            if !win.isEmpty { means.append(Double(win.reduce(0) { $0 + $1.bpm }) / Double(win.count)) }
-            t += windowS
-        }
-        if let m = means.min() { return Int(m.rounded()) }
-        let all = Double(seg.reduce(0) { $0 + $1.bpm }) / Double(seg.count)
-        return Int(all.rounded())
-    }
 
     /// One 5-min HRV window: its start ts, the sleep stage at its center, the clean-beat count, and the
     /// window RMSSD (nil when <2 clean beats). Drives both `sessionAvgHRV` and the HRV test-mode trace. (#141)

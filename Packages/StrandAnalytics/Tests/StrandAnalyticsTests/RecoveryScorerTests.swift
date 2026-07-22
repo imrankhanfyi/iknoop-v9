@@ -223,6 +223,136 @@ final class RecoveryScorerTests: XCTestCase {
         XCTAssertEqual(r, 48, "with no qualifying bin, fall back to the lowest bin mean (never nil on data)")
     }
 
+    // MARK: - RR-density gate (#686 follow-up)
+
+    /// Builds a synthetic night of consecutive 5-min bins from `start`. Each spec is
+    /// (bpm, hrCount, rrCount): `hrCount` HR samples at 1s spacing from the bin start (so the
+    /// bin mean is exactly `bpm`), and `rrCount` RR intervals likewise at 1s spacing from the
+    /// bin start (so density is exactly rrCount/hrCount, matching restingHR's own counting).
+    /// Requires hrCount, rrCount <= restingHRWindowS (300) so every sample lands in its own bin.
+    private func makeNight(start: Int, bins: [(bpm: Int, hrCount: Int, rrCount: Int)])
+        -> (hr: [HRSample], rr: [RRInterval], end: Int) {
+        var hr: [HRSample] = []
+        var rr: [RRInterval] = []
+        for (i, spec) in bins.enumerated() {
+            let binStart = start + i * RecoveryScorer.restingHRWindowS
+            for j in 0..<spec.hrCount { hr.append(HRSample(ts: binStart + j, bpm: spec.bpm)) }
+            for j in 0..<spec.rrCount { rr.append(RRInterval(ts: binStart + j, rrMs: 800)) }
+        }
+        return (hr, rr, start + bins.count * RecoveryScorer.restingHRWindowS)
+    }
+
+    func testRestingHRGateAcceptsGenuineDenseBradycardiaAcrossMultipleValues() {
+        // Derived-signal rule: recover MULTIPLE distinct injected lows, not one matched case.
+        // Night = 3 dense healthy bins @60 (density 250/300≈0.833) + ONE dense bin @the true low
+        // (same density). All bins share the same density, so the gate (which only excludes
+        // bins BELOW 0.4x the median) must not reject the low bin just for being low-bpm.
+        for low in [40, 45, 50] {
+            let start = 10_000
+            let night = makeNight(start: start, bins: [
+                (bpm: 60, hrCount: 300, rrCount: 250),
+                (bpm: 60, hrCount: 300, rrCount: 250),
+                (bpm: 60, hrCount: 300, rrCount: 250),
+                (bpm: low, hrCount: 300, rrCount: 250),
+            ])
+            let r = RecoveryScorer.restingHR(night.hr, rr: night.rr, start: start, end: night.end)
+            XCTAssertEqual(r, low, "low=\(low): a genuinely dense low-bpm bin must win the floor, not be gated out")
+        }
+    }
+
+    func testRestingHRGateRejectsSparseCollapseArtifactAcrossMultipleValues() {
+        // Derived-signal rule: recover MULTIPLE distinct injected artifact values, not one match.
+        // Night = 3 dense healthy bins @60 (density≈0.833) + ONE sparse artifact bin (rrCount 5 of
+        // 300, density≈0.017 — a beat-detector-collapse bin: erratic depressed HR, RR gone sparse).
+        // The artifact's density sits far below the night's median, so it must be gated OUT and
+        // the floor must fall back to the next genuine dense bin (60), never the artifact bpm.
+        for artifact in [35, 42, 48] {
+            let start = 20_000
+            let night = makeNight(start: start, bins: [
+                (bpm: 60, hrCount: 300, rrCount: 250),
+                (bpm: 60, hrCount: 300, rrCount: 250),
+                (bpm: 60, hrCount: 300, rrCount: 250),
+                (bpm: artifact, hrCount: 300, rrCount: 5),
+            ])
+            let r = RecoveryScorer.restingHR(night.hr, rr: night.rr, start: start, end: night.end)
+            XCTAssertEqual(r, 60, "artifact=\(artifact): a sparse collapse-artifact bin must be gated out, floor falls to the genuine 60 bpm bins")
+        }
+    }
+
+    func testRestingHRDefaultRRByteIdenticalToPreGateEstimate() {
+        // Characterization: rr defaulted to [] must reproduce the pre-gate #686 estimate exactly
+        // (min of qualified-bin means, where qualified = count>=5 AND mean>=25). Includes a
+        // sub-25 dropout bin (excluded by plausibility) and a thin <5-sample bin (excluded by
+        // count) alongside two normal bins, so all three #686 exclusion paths are exercised.
+        let start = 30_000
+        let night = makeNight(start: start, bins: [
+            (bpm: 60, hrCount: 300, rrCount: 0),   // qualified, mean 60
+            (bpm: 50, hrCount: 300, rrCount: 0),   // qualified, mean 50 -> the expected floor
+            (bpm: 10, hrCount: 300, rrCount: 0),   // sub-25 dropout bin, excluded from qualified
+            (bpm: 45, hrCount: 3, rrCount: 0),     // thin <5-sample bin, excluded from qualified
+        ])
+        // Expected by hand: qualified = [60, 50] -> min = 50.
+        let r = RecoveryScorer.restingHR(night.hr, start: start, end: night.end)
+        XCTAssertEqual(r, 50, "rr omitted (default []) must reproduce the pre-gate #686 floor byte-identically")
+    }
+
+    func testRestingHRMedianContaminationBoundary() {
+        // (a) 25% contaminated: 3 dense healthy bins @60 + 1 artifact bin @42 whose density
+        // (0.15) is well below the healthy bins' (0.833) -> median stays near the healthy
+        // density (0.833) -> the artifact's 0.15 fails the 0.4x-median bar -> REJECTED, floor 60.
+        let startA = 40_000
+        let nightA = makeNight(start: startA, bins: [
+            (bpm: 60, hrCount: 300, rrCount: 250),
+            (bpm: 60, hrCount: 300, rrCount: 250),
+            (bpm: 60, hrCount: 300, rrCount: 250),
+            (bpm: 42, hrCount: 300, rrCount: 45),   // density 45/300 = 0.15
+        ])
+        let rA = RecoveryScorer.restingHR(nightA.hr, rr: nightA.rr, start: startA, end: nightA.end)
+        XCTAssertEqual(rA, 60, "25% contamination: artifact density (0.15) is well below the healthy median -> rejected")
+
+        // (b) 75% contaminated, SAME per-bin artifact density (0.15) as (a), just 3-of-4 bins
+        // instead of 1-of-4: 1 dense healthy bin @60 + 3 artifact bins @42 at density 0.15.
+        // KNOWN/DOCUMENTED LIMIT (see restingHRGateFrac doc comment, "UNDER-CONSTRAINED"): with a
+        // majority of bins contaminated, the night median is dragged DOWN into the artifact's own
+        // density (0.15 >= restingHRMinNightDensityToGate, so the gate stays ACTIVE) — the 0.4x
+        // bar then sits at 0.4*0.15=0.06, which the artifact bins trivially clear, so they WIN
+        // the floor. This test pins that known degraded behavior; it is not a desired outcome,
+        // just the current, documented one under majority-artifact contamination.
+        let startB = 50_000
+        let nightB = makeNight(start: startB, bins: [
+            (bpm: 60, hrCount: 300, rrCount: 250),
+            (bpm: 42, hrCount: 300, rrCount: 45),
+            (bpm: 42, hrCount: 300, rrCount: 45),
+            (bpm: 42, hrCount: 300, rrCount: 45),
+        ])
+        let rB = RecoveryScorer.restingHR(nightB.hr, rr: nightB.rr, start: startB, end: nightB.end)
+        XCTAssertEqual(rB, 42, "75% contamination: median is dragged into the artifact's own density range, so it passes the gate (documented limit)")
+    }
+
+    func testRestingHRGateInactiveOnRRPoorNightLeavesArtifactUnrejected() {
+        // Night-wide RR is sparse (density well below restingHRMinNightDensityToGate=0.1) for
+        // EVERY bin, including the low-bpm artifact bin: rrCount 10 of 300 -> density 0.033 for
+        // all bins. Median density (0.033) < 0.1 -> gate stays INACTIVE, falling back to the
+        // ungated #686 floor, so the artifact is NOT rejected. Pins the RR-absent/RR-poor gap.
+        let start = 60_000
+        var loggedLines: [String] = []
+        let night = makeNight(start: start, bins: [
+            (bpm: 60, hrCount: 300, rrCount: 10),
+            (bpm: 60, hrCount: 300, rrCount: 10),
+            (bpm: 60, hrCount: 300, rrCount: 10),
+            (bpm: 42, hrCount: 300, rrCount: 10),
+        ])
+        let r = RecoveryScorer.restingHR(night.hr, rr: night.rr, start: start, end: night.end,
+                                         log: { loggedLines.append($0) })
+        XCTAssertEqual(r, 42, "RR-poor night (median density < 0.1): gate inactive, artifact not rejected")
+        XCTAssertTrue(loggedLines.contains { $0.contains("sparse") },
+                      "an RR-poor night should log why the gate fell back to the ungated floor")
+    }
+
+    func testRestingHRWithRRNilOnEmpty() {
+        XCTAssertNil(RecoveryScorer.restingHR([], rr: [], start: 0, end: 1000))
+    }
+
     // MARK: - Recovery Index: recoveryIndexSlope(_:start:end:)
 
     /// Build a synthetic in-bed HR series with a constant slope (bpm/hour) from `startBpm`,
