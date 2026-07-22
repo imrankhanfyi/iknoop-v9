@@ -78,6 +78,13 @@ public enum WorkoutDetector {
     public static let minIntensityZ2Plus: Double = 0.50
     public static let alignToleranceS: Double = 5.0
     public static let restingPercentile: Double = 10.0
+    /// Interval/HIIT qualification fallback (#B, ported from the pre-v9 fork fix): rest
+    /// periods between intervals drag a bout's average time-in-zone below
+    /// `minIntensityZ2Plus` even when the working intervals are near-max, so a bout also
+    /// qualifies on ≥ `peakQualMinSeconds` of sustained (time-weighted) time at Edwards
+    /// zone `peakQualZone`+ (≥ 70% HRR).
+    public static let peakQualZone: Int = 3
+    public static let peakQualMinSeconds: Double = 60.0
     /// Second-pass bridge window (#303). Two adjacent active runs separated by a
     /// below-motion-threshold gap no longer than this are stitched into one workout
     /// — BUT ONLY while HR stays elevated across the gap (see `bridgeRuns`). A
@@ -332,10 +339,21 @@ public enum WorkoutDetector {
                 (zonePct, avgHRR) = boutIntensity(core, restingHR: restHR, maxHR: m)
             }
 
-            // Intensity qualification: require ≥ MIN_INTENSITY_Z2PLUS in zone 2+.
+            // Intensity qualification: require ≥ MIN_INTENSITY_Z2PLUS in zone 2+, OR
+            // (interval/HIIT fallback) sustained time at zone 3+ — see peakQualZone.
             if !zonePct.isEmpty {
                 let z2plus = (2...5).reduce(0.0) { $0 + (zonePct[$1] ?? 0.0) } / 100.0
-                if z2plus < minIntensityZ2Plus { continue }
+                if z2plus < minIntensityZ2Plus {
+                    var sustainedPeakS = 0.0
+                    if let m = effMaxHR, m > restHR {
+                        let hrReserve = m - restHR
+                        for i in 0..<max(0, core.count - 1)
+                        where StrainScorer.zoneWeight(core[i].bpm, restingHR: restHR, hrReserve: hrReserve) >= peakQualZone {
+                            sustainedPeakS += min(Double(core[i + 1].ts - core[i].ts), 5.0)
+                        }
+                    }
+                    if sustainedPeakS < peakQualMinSeconds { continue }
+                }
             }
 
             // Qualified → back-date the start over the warm-up and report stats on the full window (#148).

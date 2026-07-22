@@ -47,6 +47,18 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
 
 ## Recently done
 
+- 2026-07-22: fixed CrossFit/interval workouts silently not auto-logging. `WorkoutDetector`'s
+  intensity gate (`z2plus < 0.50` average time-in-zone) rejects interval bouts because rest periods
+  between efforts drag the average below the bar, even when the working intervals are near-max —
+  this is the same bug the pre-v9 fork fixed in `07278b41` (2026-07-14), which never made it
+  upstream into v9. Ported the fix: qualify a bout on `z2plus ≥ 0.50` **OR** ≥60s sustained
+  (time-weighted) at Edwards zone 3+ (`peakQualZone`/`peakQualMinSeconds` in
+  `Packages/StrandAnalytics/Sources/StrandAnalytics/WorkoutDetector.swift`). Validated against the
+  real container DB: recovered 4 previously-dropped `detected` workouts (07-14, 07-15, 07-16, and
+  07-21's CrossFit session, 4:23–5:41pm EDT, matching the reported 4:30–5:35pm). Android twin
+  (`android/.../analytics/WorkoutDetector.kt`) ported line-for-line but **unverified** — this
+  machine has no Android SDK (only a JDK was installed via brew for the attempt); low priority since
+  this fork's daily use is macOS-only.
 - 2026-07-18: upstream rebase (19 commits), rebuild, ditto to `/Applications`, full test pass.
 - 2026-07-18: folder cleanup (4 dirs → `NOOP` + `NOOP-archive/`), ~4G build artifacts reclaimed,
   path references in CLAUDE.md + Claude memory updated, this `workspace/` layer created.

@@ -44,6 +44,15 @@ object WorkoutDetector {
     const val restingPercentile: Double = 10.0
 
     /**
+     * Interval/HIIT qualification fallback: rest periods between intervals drag a
+     * bout's average time-in-zone below [minIntensityZ2Plus] even when the working
+     * intervals are near-max, so a bout also qualifies on ≥ [peakQualMinSeconds] of
+     * sustained (time-weighted) time at Edwards zone [peakQualZone]+ (≥ 70% HRR).
+     */
+    const val peakQualZone: Int = 3
+    const val peakQualMinSeconds: Double = 60.0
+
+    /**
      * Second-pass bridge window (#303). Two adjacent active runs separated by a
      * below-motion-threshold gap no longer than this are stitched into one workout —
      * BUT ONLY while HR stays elevated across the gap (see [bridgeRuns]). A sustained
@@ -351,10 +360,22 @@ object WorkoutDetector {
                 avgHRR = ah
             }
 
-            // Intensity qualification: require ≥ MIN_INTENSITY_Z2PLUS in zone 2+.
+            // Intensity qualification: require ≥ MIN_INTENSITY_Z2PLUS in zone 2+, OR
+            // (interval/HIIT fallback) sustained time at zone 3+ — see peakQualZone.
             if (zonePct.isNotEmpty()) {
                 val z2plus = (2..5).sumOf { zonePct[it] ?: 0.0 } / 100.0
-                if (z2plus < minIntensityZ2Plus) continue
+                if (z2plus < minIntensityZ2Plus) {
+                    var sustainedPeakS = 0.0
+                    if (m != null && m > restHR) {
+                        val hrReserve = m - restHR
+                        for (i in 0 until maxOf(0, core.size - 1)) {
+                            if (StrainScorer.zoneWeight(core[i].bpm.toDouble(), restHR, hrReserve) >= peakQualZone) {
+                                sustainedPeakS += minOf((core[i + 1].ts - core[i].ts).toDouble(), 5.0)
+                            }
+                        }
+                    }
+                    if (sustainedPeakS < peakQualMinSeconds) continue
+                }
             }
 
             // Qualified → back-date the start over the warm-up and report stats on the full window (#148).
