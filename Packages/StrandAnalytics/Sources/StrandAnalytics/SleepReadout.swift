@@ -32,6 +32,59 @@ public enum SleepReadout {
         return max(0.0, min(1.0, gravSpan / hrSpan))
     }
 
+    /// How far the MOTION frontier may trail the HR frontier before the newest night is treated as
+    /// provisional.
+    ///
+    /// A caught-up strap does NOT hold the two frontiers level. Measured on a real strap
+    /// (2026-07-27): while catching up the lag fell steadily from 5007 s to 18 s, then climbed again
+    /// (49, 82, 109, 136, 178 s) because gravity had stopped at the end of an offload burst while HR
+    /// kept streaming live over 0x2A37. So the caught-up state is a SAWTOOTH whose peak is the
+    /// interval between offload bursts, and the threshold has to clear that peak or a finished night
+    /// gets badged for the tail of every cycle.
+    ///
+    /// That peak is set by the app's periodic-offload cadence: 900 s normally, but stretched to
+    /// 2700 s when the strap is low on battery (`BLEManager.backfillIntervalSeconds` /
+    /// `lowBatteryBackfillIntervalSeconds`). One hour clears the low-battery case plus the burst's own
+    /// duration, and stays far below the multi-hour lags that motivate this (a real truncated-night
+    /// case measured 29 880 s). The cost of the wide bar is that a STALLED offload is only called out
+    /// after an hour; an offload that is merely running is covered by the `backfilling` term instead.
+    ///
+    /// Cannot reference the BLE constants directly: this module is app-free and CoreBluetooth-free.
+    /// If that cadence changes, this must be re-derived.
+    public static let provisionalMotionLagS = 60 * 60
+
+    /// Whether the NEWEST night should be presented as still-syncing rather than final.
+    ///
+    /// Why this is needed at all: `gravitySample` reaches the database only through the strap's
+    /// historical offload, while `hrSample` also arrives live over the standard 0x2A37 profile.
+    /// Sleep detection derives its still-spine from gravity, so the detected wake time can never
+    /// run past the motion frontier. Mid-offload the newest night is therefore routinely truncated
+    /// at whatever hour the offload has reached, and looks like an early wake. Left unlabelled it
+    /// reads as final, and inviting a hand-correction is actively harmful: an edited session is
+    /// marked `userEdited`, which pins its end timestamp against every later recompute.
+    ///
+    /// Two independent terms, either of which is sufficient:
+    ///
+    /// 1. `backfilling` - an offload is running right now.
+    /// 2. The motion frontier trails the HR frontier by more than `provisionalMotionLagS`.
+    ///
+    /// Neither term subsumes the other. Term 1 covers a burst whose gap has already closed below
+    /// the threshold, but it describes a SINGLE offload session and goes false in the gaps between
+    /// the chained sessions of a long catch-up, so on its own it flickers across exactly the window
+    /// that matters, and it says nothing about an offload that has stalled with hours outstanding.
+    /// Term 2 covers both of those, and being a comparison of two DATA frontiers it carries no
+    /// wall-clock term, so a skewed strap clock cannot trip it.
+    ///
+    /// Returns false when either frontier is absent, so a fresh install with no samples yet is not
+    /// labelled. Callers must apply this only to the newest night: the offload replays
+    /// chronologically, so older nights are already complete.
+    public static func isNightProvisional(motionFrontierTs: Int?, hrFrontierTs: Int?,
+                                         backfilling: Bool) -> Bool {
+        if backfilling { return true }
+        guard let motionFrontierTs, let hrFrontierTs else { return false }
+        return hrFrontierTs - motionFrontierTs > provisionalMotionLagS
+    }
+
     /// The gate named by the most recent gate-trace line in the tagged log tail, or nil.
     /// Lines look like "[sleep] gate run=1 ... gate=accepted ...".
     public static func lastGateFired(taggedTail: [String]) -> String? {

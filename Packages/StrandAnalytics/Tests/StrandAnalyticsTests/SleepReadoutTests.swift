@@ -34,6 +34,88 @@ final class SleepReadoutTests: XCTestCase {
         XCTAssertLessThan(c, SleepStager.sparseGravitySpanFrac)
     }
 
+    // MARK: - isNightProvisional
+
+    /// The real case this was built for (2026-07-27). The Sleep screen showed the night ending
+    /// 01:46 when the true wake was near 05:00, because the motion frontier had only reached 03:13
+    /// while HR had streamed live to 11:31. That is a lag of 8 h 18 m, and it must read provisional.
+    func testNightProvisionalWhenMotionFrontierTrailsByHours() {
+        let hrFrontier = 1_784_474_000            // stands for 11:31 local
+        let motionFrontier = hrFrontier - 29_880  // 8 h 18 m earlier, i.e. 03:13
+        XCTAssertTrue(SleepReadout.isNightProvisional(motionFrontierTs: motionFrontier,
+                                                     hrFrontierTs: hrFrontier,
+                                                     backfilling: false))
+    }
+
+    /// The same morning's later catch-up, measured live: HR 12:34:10, gravity 11:08:16, a 5154 s
+    /// lag. Still hours of motion outstanding relative to the threshold, so still provisional.
+    func testNightProvisionalAtMidCatchUpGap() {
+        let hrFrontier = 1_784_474_000
+        XCTAssertTrue(SleepReadout.isNightProvisional(motionFrontierTs: hrFrontier - 5_154,
+                                                     hrFrontierTs: hrFrontier,
+                                                     backfilling: false))
+    }
+
+    /// Caught up: the two frontiers meet and no offload is running, so the night is final.
+    func testNightNotProvisionalWhenFrontiersAgree() {
+        let ts = 1_784_474_000
+        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: ts, hrFrontierTs: ts,
+                                                      backfilling: false))
+    }
+
+    /// A small standing lag is normal on a caught-up strap (both frontiers advance in bursts) and
+    /// must NOT badge the night. Guards the false-positive direction.
+    func testNightNotProvisionalForSmallStandingLag() {
+        let hrFrontier = 1_784_474_000
+        let justUnder = hrFrontier - (SleepReadout.provisionalMotionLagS - 1)
+        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: justUnder,
+                                                      hrFrontierTs: hrFrontier,
+                                                      backfilling: false))
+    }
+
+    /// The sawtooth peak must not badge a finished night. A caught-up strap's lag climbs between
+    /// offload bursts (gravity stalls at the end of a burst while HR keeps streaming live), so the
+    /// worst normal lag is the offload cadence: 900 s, stretched to 2700 s on a low battery. Both
+    /// must read as final, or a low-battery strap shows "still syncing" every cycle forever.
+    func testNightNotProvisionalAtOffloadCadenceSawtoothPeak() {
+        let hrFrontier = 1_784_474_000
+        for cadenceS in [900, 2_700] {
+            XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: hrFrontier - cadenceS,
+                                                          hrFrontierTs: hrFrontier,
+                                                          backfilling: false),
+                           "a \(cadenceS)s lag is a normal inter-burst sawtooth, not a lagging offload")
+        }
+    }
+
+    /// Term 1 stands alone: an offload running with the frontiers already level still means more
+    /// motion is landing, so the night is not yet final.
+    func testNightProvisionalWhileBackfillingEvenWithNoGap() {
+        let ts = 1_784_474_000
+        XCTAssertTrue(SleepReadout.isNightProvisional(motionFrontierTs: ts, hrFrontierTs: ts,
+                                                     backfilling: true))
+    }
+
+    /// A fresh install has no samples on either stream. Absent frontiers are not evidence of a
+    /// lagging offload, so nothing is badged.
+    func testNightNotProvisionalWhenFrontiersMissing() {
+        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: nil, hrFrontierTs: nil,
+                                                      backfilling: false))
+        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: nil,
+                                                      hrFrontierTs: 1_784_474_000,
+                                                      backfilling: false))
+        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: 1_784_474_000,
+                                                      hrFrontierTs: nil, backfilling: false))
+    }
+
+    /// A motion frontier AHEAD of HR (possible when the offload lands motion while live HR is
+    /// disconnected) is not a lagging offload either.
+    func testNightNotProvisionalWhenMotionLeadsHR() {
+        let hrFrontier = 1_784_474_000
+        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: hrFrontier + 3_600,
+                                                      hrFrontierTs: hrFrontier,
+                                                      backfilling: false))
+    }
+
     func testLastGateFiredParsesTaggedTail() {
         let tail = [
             "[sleep] gate run=0 spanS=1800 DROPPED gate=minSleepMin spanMin=30 minSleepMin=60",

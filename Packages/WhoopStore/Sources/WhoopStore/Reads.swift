@@ -221,6 +221,23 @@ extension WhoopStore {
         }
     }
 
+    /// Max gravity sample timestamp for a device, or nil if there are none. The MOTION frontier,
+    /// the twin of `latestHRSampleTs` above.
+    ///
+    /// Unlike HR, gravity arrives ONLY through the strap's historical offload — nothing streams it
+    /// live. Sleep detection builds its still-spine from gravity (`SleepStager.detectSleep` returns
+    /// early on fewer than two samples), so a detected night can never extend past this timestamp,
+    /// however far ahead the HR frontier has run. Comparing the two frontiers is therefore how a
+    /// caller tells a genuinely finished night from one that is merely mid-offload.
+    ///
+    /// No `UNION`: gravity has a single source table.
+    public func latestGravitySampleTs(deviceId: String) async throws -> Int? {
+        try syncRead { db in
+            try Int.fetchOne(db, sql: "SELECT MAX(ts) FROM gravitySample WHERE deviceId = ?",
+                             arguments: [deviceId])
+        }
+    }
+
     /// Aggregate storage footprint: total decoded rows, raw batch count, total raw byteSize.
     public func storageStats() async throws -> (decodedRows: Int, rawBatches: Int, rawBytes: Int) {
         try syncRead { db in

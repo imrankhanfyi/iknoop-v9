@@ -75,6 +75,13 @@ struct SleepView: View {
     /// (honest empty state for older rows whose `motionJSON` is NULL). Refreshed with `allSessions`.
     @State private var motionByStart: [Int: [Double]] = [:]
 
+    /// The active strap's motion / HR stream frontiers, for the "still syncing" badge on the newest
+    /// night. Snapshotted in the same `.task` as `allSessions` rather than read per body pass, so the
+    /// badge's view of the frontiers refreshes on exactly the `refreshSeq` bump that lands a recompute
+    /// — the badge and the night data it qualifies always come from the same moment, and the badge
+    /// clears on the same refresh that lands the final night.
+    @State private var frontiers: (motion: Int?, hr: Int?) = (nil, nil)
+
     /// Draw-in fraction for the Rest hero gauge — owned here so the gauge animates the arc on appear /
     /// when the sleep-performance score changes, exactly as TodayView drives its rings. Presentation-only.
     @State private var heroFraction: Double = 0
@@ -192,6 +199,9 @@ struct SleepView: View {
                 // Per-epoch motion for every block (#407), keyed by detected start. mergeDay reads only the
                 // already-resolved group's entries — this just pre-fetches them all so the model build is sync.
                 motionByStart = await repo.sessionMotions(starts: allSessions.map { $0.startTs })
+                // Motion / HR frontiers for the newest night's "still syncing" badge. Re-read here so
+                // the badge is evaluated against the same snapshot as the sessions it labels.
+                frontiers = await repo.streamFrontiers()
                 nightOffset = 0
                 navNight = nil
                 modelKey = dataKey
@@ -795,6 +805,19 @@ struct SleepView: View {
                     wakeEditButton(night)
                 }
                 .frame(maxWidth: .infinity)
+                // The NEWEST night can still be filling in: gravity reaches the database only through
+                // the strap's historical offload, and detection builds its still-spine from gravity, so
+                // mid-offload the night is truncated at whatever hour the offload has reached and the
+                // "Woke" above is provisional. Say so here rather than let it read as final — reaching
+                // for the edit pencil to "fix" it marks the session `userEdited`, which pins the wrong
+                // wake time against every later recompute.
+                //
+                // Its own row, not inline in the times HStack: that row already carries two times, a
+                // divider and the edit button, and the note's text would squeeze them on a phone.
+                // Only offset 0 — the offload replays chronologically, so browsed nights are complete.
+                if nightOffset == 0 {
+                    ProvisionalNightNote(motionFrontierTs: frontiers.motion, hrFrontierTs: frontiers.hr)
+                }
                 // Provenance (C4) + the "why this is your main sleep" explainer (C1). The badge names the
                 // REAL per-day merge winner; the info button reveals the foundation reason for the pick.
                 Divider().overlay(StrandPalette.hairline)
@@ -2591,6 +2614,29 @@ private struct SleepMarkCard: View {
         Task {
             guard let store = await repo.storeHandle() else { return }
             try? await store.upsertMetricSeries([mark.metricPoint], deviceId: repo.deviceId)
+        }
+    }
+}
+
+/// The "still syncing" note on the NEWEST night's window row: the same "Syncing strap history…" pill,
+/// but shown whenever that night is still PROVISIONAL, not only while an offload happens to be running.
+/// `SleepReadout.isNightProvisional` also fires on a wide motion-behind-HR frontier gap, which is what
+/// covers the long multi-session catch-up (`backfilling` goes false between the chained sessions of a
+/// burst) and a stalled offload with hours still outstanding.
+///
+/// Takes the frontiers as plain values and owns ONLY the `LiveState` observation, so a 1 Hz strap tick
+/// re-renders this leaf and not the whole Sleep screen (see the note on `SleepView`). The chunk count is
+/// passed only while an offload is actually running — a gap-triggered note has no live count to show,
+/// and a previous session's total would be misleading.
+private struct ProvisionalNightNote: View {
+    let motionFrontierTs: Int?
+    let hrFrontierTs: Int?
+    @EnvironmentObject private var live: LiveState
+    var body: some View {
+        if SleepReadout.isNightProvisional(motionFrontierTs: motionFrontierTs,
+                                           hrFrontierTs: hrFrontierTs,
+                                           backfilling: live.backfilling) {
+            SyncingHistoryNote(chunks: live.backfilling ? live.syncChunksThisSession : 0)
         }
     }
 }

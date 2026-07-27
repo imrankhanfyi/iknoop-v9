@@ -340,6 +340,23 @@ final class Repository: ObservableObject {
         return latest
     }
 
+    /// The ACTIVE strap's two stream frontiers: the newest gravity ts (motion) and the newest HR ts.
+    ///
+    /// These diverge because gravity lands only through the historical offload while HR also streams
+    /// live over the standard 0x2A37 profile. Sleep detection derives its still-spine from gravity, so
+    /// a detected night cannot reach past the motion frontier, and a wide motion-behind-HR gap means
+    /// the newest night is still being filled in rather than finished. `SleepReadout.isNightProvisional`
+    /// turns the pair into that verdict; the Sleep screen badges the night accordingly.
+    ///
+    /// Scoped to the active strap, NOT the `importedReadIds` union: an imported history's frontier says
+    /// nothing about whether THIS strap's offload has caught up.
+    func streamFrontiers() async -> (motion: Int?, hr: Int?) {
+        guard let store = await storeHandle() else { return (nil, nil) }
+        let motion = (try? await store.latestGravitySampleTs(deviceId: deviceId)) ?? nil
+        let hr = (try? await store.latestHRSampleTs(deviceId: deviceId)) ?? nil
+        return (motion, hr)
+    }
+
     /// Today's row, by the device's LOGICAL local day , NOT just the newest stored row, which after a
     /// historical import was months-old data shown as today's hero (issue #23). The logical day rolls at
     /// 04:00 local (see `logicalDayKey`), so between midnight and 4am we keep resolving the prior logical
