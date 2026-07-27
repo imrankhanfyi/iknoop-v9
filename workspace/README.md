@@ -1,6 +1,6 @@
 # workspace/ — our working layer (not upstream)
 
-Local-only continuity notes for this fork, carried on the `local/no-network` branch so they
+Local-only continuity notes for this fork, carried on the `fork/no-network` branch so they
 ride every upstream rebase and get backed up to the `personal` remote. **Source/notes only —
 no biometric data ever lives here.**
 

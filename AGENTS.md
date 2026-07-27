@@ -1,4 +1,4 @@
-# CLAUDE.md — working on NOOP
+# AGENTS.md — working on NOOP
 
 > **⚠️ LOCAL FORK NOTE (Imran's machine, 2026-07-17) — read before building or pulling upstream.**
 > This checkout is Imran's personal daily driver, not a stock clone. `/Applications/NOOP.app` is built
@@ -25,7 +25,7 @@
 > `fork/`. **Source only — biometric data never goes to any git remote.** History (why this fork, the
 > v1.61→v9 migration trail, the WHOOP-4.0 RTC/staging quirks) lives in the archived repo
 > `~/Projects/NOOP-archive/repo-v1.61` (`workspace/state.md`). Ongoing work-state for *this* repo
-> lives in `workspace/state.md` here, and in Claude's project memory (keyed to `~/Projects/NOOP` — now
+> lives in `workspace/state.md` here, and in Codex's project memory (keyed to `~/Projects/NOOP` — now
 > this repo, after the 2026-07-18 folder cleanup).
 
 Guidance for anyone (human or AI agent) submitting a pull request. This is the high-signal map;

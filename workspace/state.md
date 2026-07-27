@@ -1,11 +1,11 @@
 # NOOP — working state (v9 era)
 
-_Last updated: 2026-07-18. This is the ongoing log for the active repo. Historical trail
+_Last updated: 2026-07-27. This is the ongoing log for the active repo. Historical trail
 (v1.61–v1.68) is in `~/Projects/NOOP-archive/repo-v1.61/workspace/state.md`._
 
 ## Where things stand (2026-07-18)
 
-- **Active repo:** `~/Projects/NOOP` (this repo), branch **`local/no-network`**, based on
+- **Active repo:** `~/Projects/NOOP` (this repo), branch **`fork/no-network`**, based on
   `ryanbr/noop`. **Rebased onto `origin/main` on 2026-07-18** — pulled 19 upstream commits past
   the v9.0.1 tag; our local patches replayed cleanly on top (0 conflicts).
 - **Two permanent local patches** (ride the rebase stack forever — see `CLAUDE.md` banner):
@@ -47,6 +47,26 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
 
 ## Recently done
 
+- 2026-07-27: **renamed the branch `local/no-network` → `fork/no-network`, and closed the backup gaps.**
+  The branch was always fully pushed to `personal`, but the name's "local" token (meaning *local to this
+  fork*, as `CLAUDE.md` uses it for the two "local patches") read as "not pushed" and caused real
+  confusion about whether a backup existed. `fork/` states the actual meaning. Renamed on GitHub too
+  (default branch moved first — GitHub refuses to delete a repo's default branch), and the reference
+  updates were committed **before** the first push so the rename and the docs explaining it travelled
+  together. Backup topology confirmed correct and deliberately left alone: `imrankhanfyi/iknoop-v9` is a
+  **standalone private repo, not a fork**, because GitHub forks inherit the parent's visibility — a
+  private fork of public `ryanbr/noop` is impossible. Standalone also means the push carried every
+  ancestor commit, so it restores with no dependency on upstream still existing. There is deliberately
+  no `main` on `personal`: this branch IS the trunk.
+  Gaps closed: `AGENTS.md` is now tracked (it had never been added, so the one file in the tree with
+  **zero** presence in the backup); the immutable semver release tags are pushed (deliberately NOT
+  `--tags` — `testing-latest`, `noop-staging`, `ci-appbuild` are *moving* upstream tags that nothing on
+  `personal` tracks, so copies there would freeze stale and mislead); and the archive repo's one missing
+  commit is pushed. Cadence stays **manual** — `/ship` already pushes.
+  **Out of scope but recorded because it is the real exposure:** Time Machine's destination is
+  `Macintosh HD` (a *local* destination) and currently fails to mount, so nothing outside git has a
+  working off-machine backup. That matters for `NOOP-archive/migration-backup-2026-07-17` (133M), which
+  holds the container SQLite — biometric data, which by hard rule can never go to a git remote.
 - 2026-07-27: **"still syncing" badge on a provisional sleep night** (`ca0fbcc4`, `c5d21d66`).
   Investigated "NOOP says I slept til 1:30am, I actually slept til 5am": nothing was wrong with the
   analytics. `gravitySample` lands ONLY via the historical offload while `hrSample` also streams live
