@@ -59,7 +59,8 @@ component is needed.
 A night is treated as provisional when either of two conditions holds:
 
 1. `live.backfilling`, already published by `BLEManager` (`state.backfilling`, set at line 1568,
-   cleared in `exitBackfilling` at 1668).
+   cleared in `exitBackfilling` at 1668), qualified by `SleepReadout.nightCouldStillGrow(nightEndTs:motionFrontierTs:)`
+   (see below).
 2. `latestHRSampleTs − latestGravitySampleTs > provisionalMotionLagS`.
 
 Both terms are load-bearing:
@@ -97,6 +98,35 @@ case: a naive "night ends near the frontier" rule would have missed it, since th
 
 Term 2 is gated on `nightOffset == 0` only. The offload replays chronologically, so older browsed
 nights are already complete and must not be badged.
+
+**Term 1 needed its own gate; term 2 does not.** Term 1 as designed above was unconditional.
+`startBackfillTimer` re-runs a periodic offload every `BLEManager.backfillIntervalSeconds` (900 s,
+15 min) while connected, so on a strap that has fully caught up, term 1 fires every 15 minutes all
+day, painting the pill directly underneath a wake time that is already correct and final. Concrete
+instance: a night that was final at 05:08 while the motion frontier had already advanced to 12:58,
+about eight hours past it, would still have shown the badge on every periodic offload even though
+that night provably could not grow. The consequence is that the badge gets trained into background
+noise well before the next morning, which is the exact situation it was built to flag.
+
+The fix is a new internal helper, `SleepReadout.nightCouldStillGrow(nightEndTs:motionFrontierTs:)`,
+that gates term 1. It returns true when `motionFrontierTs − nightEndTs <=
+SleepStager.nightContinuationGapMin * 60` (90 minutes). That constant is not a new one invented for
+this; it is the detector's own bound. A still-run beginning more than that far after the previous
+accepted run does not continue the overnight chain, it faces the full nap guard as isolated daytime
+stillness. So once the motion frontier has advanced further than that past the night's end without
+the night having grown, the window in which an extension could have been found is fully covered,
+and the night is settled. The helper is conservative on missing inputs: an unknown night end or
+frontier returns true, so it never silently suppresses the badge. `SleepView` now passes
+`night.session.endTs` into the badge leaf so the gate has a night end to compare against.
+
+Term 2 is deliberately not gated the same way. The recompute lags the frontier: on the reported
+case, the night still read 01:46 while the motion frontier had already reached 03:13, a delta of 87
+minutes against the 90-minute bound, only 3 minutes inside it. A slightly staler recompute would
+have pushed that delta past the bound, so gating term 2 on the same threshold would have come
+within 3 minutes of suppressing the very signal the feature exists for. This is also why the
+earlier point in this section stands: a naive "night ends near the frontier" rule would have missed
+the reported case. The accepted cost of leaving term 2 ungated is that a night that is genuinely
+final but sits behind a stalled offload can still be badged; that is the safe direction to err.
 
 ### 2. Threshold: probe disproved the floor premise; derived from offload cadence instead
 
@@ -181,8 +211,8 @@ Ship as a named constant beside the other `SleepStager` tuning values, never a l
 | File | Change |
 |---|---|
 | `Packages/WhoopStore/Sources/WhoopStore/Reads.swift` | Add `latestGravitySampleTs(deviceId:)`, mirroring `latestHRSampleTs` (line 212) verbatim in shape, same `syncRead` / `Int.fetchOne` idiom. No `UNION` (gravity has one source). |
-| `Packages/StrandAnalytics/Sources/StrandAnalytics/SleepReadout.swift` | Add the pure predicate + the `provisionalMotionLagS` constant. Pure `(Int?, Int?, Bool) -> Bool`, database-free, so it unit-tests with no app and no strap. |
-| `Strand/Screens/SleepView.swift` | Render the pill in `sleepWindowRow` (line 783), beside the "Woke" value and the `wakeEditButton`, above the existing `Divider()` / `mainSleepFooter`. Load the two frontiers in the existing `.task(id: repo.refreshSeq)` (line 187) alongside `allSessions` / `motionByStart`, into `@State`, never read the store per body pass. |
+| `Packages/StrandAnalytics/Sources/StrandAnalytics/SleepReadout.swift` | Add the pure predicate `isNightProvisional(nightEndTs:motionFrontierTs:hrFrontierTs:backfilling:)`, the `nightCouldStillGrow(nightEndTs:motionFrontierTs:)` gate, and the `provisionalMotionLagS` constant. Pure `(Int?, Int?, Int?, Bool) -> Bool`, database-free, so it unit-tests with no app and no strap. |
+| `Strand/Screens/SleepView.swift` | Render the pill in `sleepWindowRow` (line 783), beside the "Woke" value and the `wakeEditButton`, above the existing `Divider()` / `mainSleepFooter`. Load the two frontiers in the existing `.task(id: repo.refreshSeq)` (line 187) alongside `allSessions` / `motionByStart`, into `@State`, never read the store per body pass. Also passes `night.session.endTs` as the predicate's `nightEndTs` argument. |
 
 **Why `SleepReadout` and not `Strand/`.** The choice follows from reading the file first: it is
 described as "pure values for the Sleep & Rest live-readout panel", 147 lines, database-free, with
@@ -240,9 +270,14 @@ own.
 
 1. `cd Packages/StrandAnalytics && swift test`, the pure predicate. Cases: today's real numbers
    (HR 11:31 / motion 03:13 → true), caught-up equal frontiers → false, `nil` frontiers → false
-   (must not badge a fresh install), `backfilling == true` with a zero gap → true.
+   (must not badge a fresh install), `backfilling == true` with a zero gap → true, a settled night
+   with an offload running is not badged, a night 87 minutes behind the frontier with an offload
+   running is badged, the `nightContinuationGapMin` bound is inclusive at exactly 90 minutes and
+   false one second past it, missing `nightEndTs` / `motionFrontierTs` stay conservative (the gate
+   returns true rather than suppressing the badge), and a wide frontier gap still badges even when
+   the could-still-grow gate is shut. The suite now stands at 1117 StrandAnalytics tests passing.
 2. `cd Packages/WhoopStore && swift test`, `latestGravitySampleTs` returns the max, and `nil` on
-   an empty table.
+   an empty table. 268 WhoopStore tests passing.
 3. `xcodegen generate && xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`,
    the app target CI will not check.
 4. `xcodebuild … -scheme Strand test` for `StrandTests` (macOS only).

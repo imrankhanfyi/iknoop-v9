@@ -42,7 +42,7 @@ final class SleepReadoutTests: XCTestCase {
     func testNightProvisionalWhenMotionFrontierTrailsByHours() {
         let hrFrontier = 1_784_474_000            // stands for 11:31 local
         let motionFrontier = hrFrontier - 29_880  // 8 h 18 m earlier, i.e. 03:13
-        XCTAssertTrue(SleepReadout.isNightProvisional(motionFrontierTs: motionFrontier,
+        XCTAssertTrue(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: motionFrontier,
                                                      hrFrontierTs: hrFrontier,
                                                      backfilling: false))
     }
@@ -51,7 +51,7 @@ final class SleepReadoutTests: XCTestCase {
     /// lag. Still hours of motion outstanding relative to the threshold, so still provisional.
     func testNightProvisionalAtMidCatchUpGap() {
         let hrFrontier = 1_784_474_000
-        XCTAssertTrue(SleepReadout.isNightProvisional(motionFrontierTs: hrFrontier - 5_154,
+        XCTAssertTrue(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: hrFrontier - 5_154,
                                                      hrFrontierTs: hrFrontier,
                                                      backfilling: false))
     }
@@ -59,7 +59,7 @@ final class SleepReadoutTests: XCTestCase {
     /// Caught up: the two frontiers meet and no offload is running, so the night is final.
     func testNightNotProvisionalWhenFrontiersAgree() {
         let ts = 1_784_474_000
-        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: ts, hrFrontierTs: ts,
+        XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: ts, hrFrontierTs: ts,
                                                       backfilling: false))
     }
 
@@ -68,7 +68,7 @@ final class SleepReadoutTests: XCTestCase {
     func testNightNotProvisionalForSmallStandingLag() {
         let hrFrontier = 1_784_474_000
         let justUnder = hrFrontier - (SleepReadout.provisionalMotionLagS - 1)
-        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: justUnder,
+        XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: justUnder,
                                                       hrFrontierTs: hrFrontier,
                                                       backfilling: false))
     }
@@ -80,7 +80,7 @@ final class SleepReadoutTests: XCTestCase {
     func testNightNotProvisionalAtOffloadCadenceSawtoothPeak() {
         let hrFrontier = 1_784_474_000
         for cadenceS in [900, 2_700] {
-            XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: hrFrontier - cadenceS,
+            XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: hrFrontier - cadenceS,
                                                           hrFrontierTs: hrFrontier,
                                                           backfilling: false),
                            "a \(cadenceS)s lag is a normal inter-burst sawtooth, not a lagging offload")
@@ -91,19 +91,19 @@ final class SleepReadoutTests: XCTestCase {
     /// motion is landing, so the night is not yet final.
     func testNightProvisionalWhileBackfillingEvenWithNoGap() {
         let ts = 1_784_474_000
-        XCTAssertTrue(SleepReadout.isNightProvisional(motionFrontierTs: ts, hrFrontierTs: ts,
+        XCTAssertTrue(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: ts, hrFrontierTs: ts,
                                                      backfilling: true))
     }
 
     /// A fresh install has no samples on either stream. Absent frontiers are not evidence of a
     /// lagging offload, so nothing is badged.
     func testNightNotProvisionalWhenFrontiersMissing() {
-        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: nil, hrFrontierTs: nil,
+        XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: nil, hrFrontierTs: nil,
                                                       backfilling: false))
-        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: nil,
+        XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: nil,
                                                       hrFrontierTs: 1_784_474_000,
                                                       backfilling: false))
-        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: 1_784_474_000,
+        XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: 1_784_474_000,
                                                       hrFrontierTs: nil, backfilling: false))
     }
 
@@ -111,9 +111,67 @@ final class SleepReadoutTests: XCTestCase {
     /// disconnected) is not a lagging offload either.
     func testNightNotProvisionalWhenMotionLeadsHR() {
         let hrFrontier = 1_784_474_000
-        XCTAssertFalse(SleepReadout.isNightProvisional(motionFrontierTs: hrFrontier + 3_600,
+        XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nil, motionFrontierTs: hrFrontier + 3_600,
                                                       hrFrontierTs: hrFrontier,
                                                       backfilling: false))
+    }
+
+    // MARK: - isNightProvisional, term 1's could-still-grow gate
+
+    /// The noise case. Last night was final at 05:08 and by early afternoon the motion frontier had
+    /// run roughly eight hours past it. A routine periodic offload fires every
+    /// `backfillIntervalSeconds` while connected, so without this gate the pill would paint under a
+    /// CORRECT wake time every quarter hour, all day, and mean nothing by the morning it matters.
+    func testBackfillingDoesNotBadgeASettledNight() {
+        let nightEnd = 1_784_474_000
+        let motionFrontier = nightEnd + 470 * 60   // 05:08 night end vs a 12:58 frontier
+        XCTAssertFalse(SleepReadout.isNightProvisional(nightEndTs: nightEnd,
+                                                      motionFrontierTs: motionFrontier,
+                                                      hrFrontierTs: motionFrontier,
+                                                      backfilling: true))
+    }
+
+    /// The gate must NOT suppress the real case. At the reported 11:31 snapshot the night still read
+    /// 01:46 while the motion frontier had reached 03:13: a delta of 87 minutes, inside the bound, so
+    /// this night could still grow and an offload running over it is worth saying.
+    func testBackfillingStillBadgesANightThatCanGrow() {
+        let nightEnd = 1_784_474_000
+        let motionFrontier = nightEnd + 87 * 60
+        XCTAssertTrue(SleepReadout.isNightProvisional(nightEndTs: nightEnd,
+                                                     motionFrontierTs: motionFrontier,
+                                                     hrFrontierTs: motionFrontier,
+                                                     backfilling: true))
+    }
+
+    /// The bound is the detector's own `nightContinuationGapMin`, inclusive: past it, later stillness
+    /// opens a separate session instead of extending this night, so the window in which an extension
+    /// could have been found is fully covered.
+    func testCouldStillGrowBoundIsNightContinuationGap() {
+        let nightEnd = 1_784_474_000
+        let gapS = SleepStager.nightContinuationGapMin * 60
+        XCTAssertTrue(SleepReadout.nightCouldStillGrow(nightEndTs: nightEnd,
+                                                       motionFrontierTs: nightEnd + gapS))
+        XCTAssertFalse(SleepReadout.nightCouldStillGrow(nightEndTs: nightEnd,
+                                                        motionFrontierTs: nightEnd + gapS + 1))
+        // Conservative on missing inputs: an unknown night end must not silently suppress the badge.
+        XCTAssertTrue(SleepReadout.nightCouldStillGrow(nightEndTs: nil, motionFrontierTs: nightEnd))
+        XCTAssertTrue(SleepReadout.nightCouldStillGrow(nightEndTs: nightEnd, motionFrontierTs: nil))
+    }
+
+    /// Term 2 is deliberately NOT gated on the same delta. The recompute lags the frontier, so on the
+    /// real case the night read 01:46 against an 03:13 frontier: 87 minutes, only 3 short of the
+    /// 90-minute bound. A slightly staler recompute would have pushed it past, and gating term 2 would
+    /// then have suppressed exactly the signal this feature exists for. So a wide frontier gap badges
+    /// the night even when the could-still-grow gate is shut.
+    func testWideFrontierGapBadgesEvenWhenGateIsShut() {
+        let nightEnd = 1_784_474_000
+        let motionFrontier = nightEnd + 470 * 60          // gate shut: night is settled
+        XCTAssertFalse(SleepReadout.nightCouldStillGrow(nightEndTs: nightEnd,
+                                                        motionFrontierTs: motionFrontier))
+        XCTAssertTrue(SleepReadout.isNightProvisional(nightEndTs: nightEnd,
+                                                     motionFrontierTs: motionFrontier,
+                                                     hrFrontierTs: motionFrontier + 29_880,
+                                                     backfilling: false))
     }
 
     func testLastGateFiredParsesTaggedTail() {

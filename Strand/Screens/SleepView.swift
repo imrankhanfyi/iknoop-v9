@@ -816,7 +816,9 @@ struct SleepView: View {
                 // divider and the edit button, and the note's text would squeeze them on a phone.
                 // Only offset 0 — the offload replays chronologically, so browsed nights are complete.
                 if nightOffset == 0 {
-                    ProvisionalNightNote(motionFrontierTs: frontiers.motion, hrFrontierTs: frontiers.hr)
+                    ProvisionalNightNote(nightEndTs: night.session.endTs,
+                                        motionFrontierTs: frontiers.motion,
+                                        hrFrontierTs: frontiers.hr)
                 }
                 // Provenance (C4) + the "why this is your main sleep" explainer (C1). The badge names the
                 // REAL per-day merge winner; the info button reveals the foundation reason for the pick.
@@ -2622,18 +2624,22 @@ private struct SleepMarkCard: View {
 /// but shown whenever that night is still PROVISIONAL, not only while an offload happens to be running.
 /// `SleepReadout.isNightProvisional` also fires on a wide motion-behind-HR frontier gap, which is what
 /// covers the long multi-session catch-up (`backfilling` goes false between the chained sessions of a
-/// burst) and a stalled offload with hours still outstanding.
+/// burst) and a stalled offload with hours still outstanding. The `backfilling` term is itself
+/// qualified on whether THIS night could still grow, so a routine periodic offload does not label an
+/// already-settled wake time every quarter hour; that is why the night's end is passed in.
 ///
 /// Takes the frontiers as plain values and owns ONLY the `LiveState` observation, so a 1 Hz strap tick
 /// re-renders this leaf and not the whole Sleep screen (see the note on `SleepView`). The chunk count is
 /// passed only while an offload is actually running — a gap-triggered note has no live count to show,
 /// and a previous session's total would be misleading.
 private struct ProvisionalNightNote: View {
+    let nightEndTs: Int
     let motionFrontierTs: Int?
     let hrFrontierTs: Int?
     @EnvironmentObject private var live: LiveState
     var body: some View {
-        if SleepReadout.isNightProvisional(motionFrontierTs: motionFrontierTs,
+        if SleepReadout.isNightProvisional(nightEndTs: nightEndTs,
+                                           motionFrontierTs: motionFrontierTs,
                                            hrFrontierTs: hrFrontierTs,
                                            backfilling: live.backfilling) {
             SyncingHistoryNote(chunks: live.backfilling ? live.syncChunksThisSession : 0)

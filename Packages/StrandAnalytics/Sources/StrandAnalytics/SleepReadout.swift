@@ -75,14 +75,43 @@ public enum SleepReadout {
     /// Term 2 covers both of those, and being a comparison of two DATA frontiers it carries no
     /// wall-clock term, so a skewed strap clock cannot trip it.
     ///
+    /// Term 1 is additionally qualified on `nightCouldStillGrow`. Unqualified it fires on EVERY
+    /// periodic offload (every `backfillIntervalSeconds` while connected), so on a caught-up strap it
+    /// would label a correct wake time all day long and the badge would be trained into background
+    /// noise before the morning it actually matters. Term 2 is deliberately NOT qualified the same
+    /// way: the recompute lags the frontier, so on the real case the night still read 01:46 while the
+    /// motion frontier had already reached 03:13, a delta of 87 minutes against the 90-minute bound.
+    /// Gating term 2 on that delta would have come within 3 minutes of suppressing the very signal
+    /// this exists for. The cost is that a night which is genuinely final but sits behind a STALLED
+    /// offload can still be badged; that is the safe direction to err.
+    ///
     /// Returns false when either frontier is absent, so a fresh install with no samples yet is not
     /// labelled. Callers must apply this only to the newest night: the offload replays
     /// chronologically, so older nights are already complete.
-    public static func isNightProvisional(motionFrontierTs: Int?, hrFrontierTs: Int?,
-                                         backfilling: Bool) -> Bool {
-        if backfilling { return true }
+    public static func isNightProvisional(nightEndTs: Int?, motionFrontierTs: Int?,
+                                         hrFrontierTs: Int?, backfilling: Bool) -> Bool {
+        if backfilling,
+           nightCouldStillGrow(nightEndTs: nightEndTs, motionFrontierTs: motionFrontierTs) {
+            return true
+        }
         guard let motionFrontierTs, let hrFrontierTs else { return false }
         return hrFrontierTs - motionFrontierTs > provisionalMotionLagS
+    }
+
+    /// Whether more offloaded motion could still EXTEND this night, rather than only add a separate
+    /// later session.
+    ///
+    /// `SleepStager.nightContinuationGapMin` is the bound the detector itself uses: a still-run that
+    /// begins more than that far after the previous accepted run does not continue the overnight
+    /// chain, it faces the full nap guard as isolated daytime stillness. So once the motion frontier
+    /// has advanced further than that past the night's end WITHOUT the night having grown, the window
+    /// in which an extension could have been found is fully covered and this night is settled.
+    ///
+    /// Conservative when either input is absent: an unknown night end cannot be ruled out, so it
+    /// returns true rather than silently suppressing the badge.
+    static func nightCouldStillGrow(nightEndTs: Int?, motionFrontierTs: Int?) -> Bool {
+        guard let nightEndTs, let motionFrontierTs else { return true }
+        return motionFrontierTs - nightEndTs <= SleepStager.nightContinuationGapMin * 60
     }
 
     /// The gate named by the most recent gate-trace line in the tagged log tail, or nil.
