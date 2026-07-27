@@ -27,6 +27,12 @@
 > `~/Projects/NOOP-archive/repo-v1.61` (`workspace/state.md`). Ongoing work-state for *this* repo
 > lives in `workspace/state.md` here, and in Codex's project memory (keyed to `~/Projects/NOOP` — now
 > this repo, after the 2026-07-18 folder cleanup).
+>
+> **Rebase hazard for these two files.** This banner lives in `CLAUDE.md` (upstream-tracked, so
+> an upstream edit to it genuinely conflicts — do NOT resolve by taking upstream wholesale) and in
+> `AGENTS.md`, which upstream does **not** have at all: we track it, so the day upstream adds one
+> it is an add/add conflict. Keep the banner in whichever survives. The purely additive local
+> files (`workspace/`, `docs/superpowers/specs/`) never conflict.
 
 Guidance for anyone (human or AI agent) submitting a pull request. This is the high-signal map;
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) is the full guide (BLE safety contract, design-system
