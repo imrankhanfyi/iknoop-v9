@@ -47,6 +47,41 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
 
 ## Recently done
 
+- 2026-07-27: **"still syncing" badge on a provisional sleep night** (`ca0fbcc4`, `c5d21d66`).
+  Investigated "NOOP says I slept til 1:30am, I actually slept til 5am": nothing was wrong with the
+  analytics. `gravitySample` lands ONLY via the historical offload while `hrSample` also streams live
+  over 0x2A37, and `SleepStager` builds its still-spine from gravity, so the displayed wake was the
+  **motion-offload frontier**, not a wake. It self-corrected with no code change (01:46 → 03:50 →
+  05:15 → 05:08; resting HR 72 → 64). See memory `noop-partial-night-offload-frontier` — and **never
+  hand-edit such a night**, `userEdited` then pins `endTs` against every recompute.
+  Shipped: `latestGravitySampleTs` (`Reads.swift`), `Repository.streamFrontiers()`, and a pure
+  `SleepReadout.isNightProvisional` driving the existing "Syncing strap history…" pill on the newest
+  night's window row (`SleepView.sleepWindowRow`, gated to `nightOffset == 0`). Two OR'd terms:
+  `backfilling`, and motion trailing HR by > `provisionalMotionLagS`.
+  **Two values were set by evidence, not by the plan** (both documented in
+  `docs/superpowers/specs/2026-07-27-sleep-syncing-badge-design.md`):
+  1. Threshold is **60 min, not 30**. A probe disproved its own premise: the caught-up lag is a
+     **sawtooth**, not a floor (fell 5007s → 18s, then climbed 49/82/109/136/178/205/219s as gravity
+     stopped at a burst end while HR streamed on). The bound is the offload cadence —
+     `backfillIntervalSeconds` 900s, stretched to `lowBatteryBackfillIntervalSeconds` **2700s** —
+     so 30 min would badge a *finished* night every cycle on a low-battery strap.
+  2. Term 1 is **gated** on `nightCouldStillGrow` (`SleepStager.nightContinuationGapMin`, 90 min).
+     Unqualified it fires on every 15-min periodic offload, painting the pill under an
+     already-correct wake time all day. Term 2 is deliberately NOT gated the same way: the recompute
+     lags the frontier (night read 01:46 against an 03:13 frontier = 87 min, only 3 min inside the
+     bound), so gating it would nearly have suppressed the real signal.
+  Verified: all packages green (286/268/1117/207/32/9, 0 failures); Strand macOS target builds;
+  installed Release to `/Applications` via `ditto` (never re-signed — sandbox + `com.noopapp.noop`
+  identity re-checked after install; prior bundle backed up to
+  `~/Projects/NOOP-archive/installed-app-backup-2026-07-27/`). Both **suppression** paths confirmed
+  on live data in the shipped binary: at 13:21:32 an offload advanced gravity while the pill stayed
+  hidden because the gate was shut (night end 05:08 vs frontier 13:21).
+  **Still unverified:** the *positive* render — nobody has seen the pill drawn. Next morning's
+  backfill exercises both terms at once (87-min delta opens the gate, multi-hour gap trips term 2);
+  glance at the Sleep screen before the offload catches up. Also `NOOPiOS` does **not** build on this
+  machine (iOS 26.5 *platform* not installed; bypassing the scheme fails in `swift-markdown-ui`'s
+  `NetworkImage` — unrelated to these files), and there is **no Android twin** (display-only
+  predicate, no stored value/scoring/migration, and no Android SDK here).
 - 2026-07-22: fixed CrossFit/interval workouts silently not auto-logging. `WorkoutDetector`'s
   intensity gate (`z2plus < 0.50` average time-in-zone) rejects interval bouts because rest periods
   between efforts drag the average below the bar, even when the working intervals are near-max —
