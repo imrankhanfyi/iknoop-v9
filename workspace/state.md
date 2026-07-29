@@ -1,7 +1,41 @@
 # NOOP — working state (v9 era)
 
-_Last updated: 2026-07-27. This is the ongoing log for the active repo. Historical trail
+_Last updated: 2026-07-29. This is the ongoing log for the active repo. Historical trail
 (v1.61–v1.68) is in `~/Projects/NOOP-archive/repo-v1.61/workspace/state.md`._
+
+## NEXT PICKUP — `workspace/noop-phone/` (blocked on ONE decision, Imran's)
+
+Read **`workspace/noop-phone/README.md`** first; it is the full handoff (design, the ported traps,
+the safety properties, and the open decision). This section is only the "where were we" pointer.
+
+**Built and verified:** `noop-publish` (Mac-side Swift CLI: reads the live container store read-only,
+emits a ~36 KB encrypted `noop-data.json`) and `viewer/` (self-contained HTML/JS page that decrypts in
+the browser and renders Today / Last night / Sleep history / Workouts / Trends). 13 files, additive,
+`workspace/`-local — touches no app code and neither `fork/no-network` patch.
+
+**BLOCKED on Imran choosing how the viewer is served.** A red-team pass killed the original
+"hermes dashboard plugin over the tailnet" hosting layer on two grounds, both measured:
+1. `crypto.subtle` **does not exist** on `http://freckleclaw.tail4d0805.ts.net:9119` — WebCrypto is
+   secure-context-only and the tailnet is plain HTTP. Measured `isSecureContext:false` there vs
+   `true` on `https://` and on `http://127.0.0.1`. No decryption is possible as configured today.
+2. Plugin assets are served from `/opt/data`, **the hermes agent's own writable tree**, and hermes'
+   `SETUP.md` says the tailnet is the only real boundary. An agent that can rewrite `index.html` can
+   capture the passphrase, reducing client-side encryption to theatre against exactly its threat
+   model. (Symmetrically, a page same-origin with the dashboard inherits its session cookie and can
+   reach `/api/env/reveal`.)
+
+The two options — **(A)** enable Tailscale HTTPS certs then `tailscale serve --https`, or **(B)**
+accept plaintext biometrics on the VPS — are written up with their costs in the README. **Do not pick
+for him.** The generator and viewer are identical either way; only where `index.html` is served differs.
+
+**Remaining work once he decides** (ordered, ~an evening; the full version is in the README):
+keychain passphrase → launchd daily timer → [if A] the hermes plugin wrapper → Tailscale on the
+iPhone → **load it on the actual iPhone**. That last step is the one real verification gap: the
+viewer has been driven in a headless WKWebView at 414×896 (all 5 tabs render, decryption succeeds,
+wrong passphrase fails cleanly, zero JS errors) but **has never run on Imran's phone**. A simulated
+Safari is not his Safari.
+
+Nothing here is a NOOP.app change, so no Android twin and no migration is involved.
 
 ## Where things stand (2026-07-18)
 
@@ -44,9 +78,78 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
    fires an ungated outbound GET. On macOS this is currently blocked ONLY by the stripped network
    entitlement (patch 1). If ever restoring the entitlement to enable AI Coach, first set a no-op /
    allowlist `imageProvider`. Worth reporting upstream regardless.
+4. **INVESTIGATE: store growth — 411 MB, ~half of it index overhead.** Raised 2026-07-28. The
+   container DB is 413,741,056 bytes for **one year** of data (`hrSample` spans 2025-07-30 →
+   2026-07-29, 1,321,682 rows), i.e. ~400 MB/yr monotonic. Per-table (`dbstat`, MB):
+
+   ```
+   gravitySample|56   sqlite_autoindex_rrInterval_1|32   spo2Sample|32
+   sqlite_autoindex_hrSample_1|30          hrSample|30   sqlite_autoindex_spo2Sample_1|29
+   sqlite_autoindex_skinTempSample_1|29    sqlite_autoindex_respSample_1|29
+   sqlite_autoindex_gravitySample_1|29     rrInterval|29 skinTempSample|28   respSample|28
+   ```
+
+   Two observations worth chasing, neither yet a diagnosed defect:
+   - **The autoindexes are as large as the tables they index.** Every per-second table is
+     `PRIMARY KEY (deviceId, ts)` with `deviceId` a TEXT column, so a short string is duplicated
+     ~7M times across the store. Interning `deviceId` to an INTEGER id (or reordering to an
+     `INTEGER PRIMARY KEY` rowid + covering index) could plausibly reclaim a large fraction.
+   - **The decoded streams are never pruned, by design.** `Database.swift:542-545` says so
+     explicitly, and `PrunePolicy`'s ~50 MB cap governs **only** `rawBatch`. There is no retention
+     policy for `hrSample`/`rrInterval`/`spo2Sample`/`skinTempSample`/`respSample`/`gravitySample`.
+     A downsample-after-N-months policy (keep per-second for the recent window, roll older data to
+     per-minute aggregates) is the obvious candidate — but note `Repository.reconcileWorkoutHrWithTrace`
+     recomputes historical workout avg/max HR from `hrSample` on every read, so pruning raw samples
+     silently changes displayed history. Resolve that coupling first.
+
+   Any change here needs a versioned migration + test (never mutate an existing migration) and an
+   Android twin per the parity contract. Measure with `VACUUM INTO` on a copy before/after — do not
+   experiment on the live container store.
+5. **The sleep-stage palette fails a colour-vision-deficiency separation check.** Raised 2026-07-29
+   while building `workspace/noop-phone/`. The three hypnogram tokens
+   (`Packages/StrandDesign/Sources/StrandDesign/Palette.swift:206-208`) are all violet-magenta:
+
+   ```
+   206: sleepLight  light "#7B78E0"  dark "#A7A4F4"
+   207: sleepDeep   light "#C13EC1"  dark "#FD96FD"
+   208: sleepREM    light "#8E3BD6"  dark "#AE5BEF"
+   ```
+
+   The `dataviz` skill's `validate_palette.js` **FAILS** the deep/REM and light/REM pairs on both CVD
+   separation and the normal-vision floor — worst normal-vision ΔE ≈ **10.7–13.5 against a floor of
+   15**, i.e. they are hard to tell apart even with unimpaired colour vision, and near-identical under
+   deuteranopia/protanopia. This affects `SleepView`'s stage chart and legend in the shipped app, not
+   just the side project. Scope note: only the **default** palette was measured; the `isClassic`
+   variants (`cSleepLight`/`cSleepDeep`/`cSleepREM`) were not evaluated. The phone viewer kept these
+   colours deliberately (its job is to match the app) and mitigated with an always-visible text legend,
+   a stage-totals table, and a `forced-colors`/`prefers-contrast` texture overlay — the same three
+   mitigations would work in SwiftUI. **Upstream-reportable and not fork-specific;** a token change is
+   also a design-system change, so it is `ryanbr/noop`'s call, not ours.
 
 ## Recently done
 
+- 2026-07-29: **`workspace/noop-phone/` — encrypted read-only NOOP viewer for the iPhone.** See the
+  NEXT PICKUP section above for status and the README for the full handoff. Recording here only the
+  findings that are **about NOOP itself** and would otherwise be lost with the side project:
+  1. **Workout avg/max HR are recomputed at render and never persisted**
+     (`Repository.reconcileWorkoutHrWithTrace`), and the reconcile spends a **300-row budget in
+     newest-first order** (`Repository.swift:2053` sorts descending *before* reconciling). Any
+     consumer that reads the stored `avgHr` column, or that iterates oldest-first, is wrong: the 834
+     imported `apple-health` rows all have `avgHr IS NULL` so all are eligible and eat the whole
+     budget. Measured divergence on this store: detected rows read **114/123 stored vs 118/124
+     reconciled**. This is also the coupling that blocks naive `hrSample` pruning (open item 4).
+  2. **Night/bout dismissals live in UserDefaults, not SQLite** (`sleep.dismissedSessions`,
+     `workouts.dismissedDetected` in the container plist). Both empty today. Any exporter that reads
+     only the DB resurrects every deleted night.
+  3. **`dailyMetric` sleep is not derivable from `sleepSession`** — they reconcile on 14 of 16 nights;
+     2026-07-14 differs because the daily row was scored from a differently-bridged detection pass.
+     Never sum sessions to make a daily total.
+  4. **`AnalyticsEngine.Rest.composite` reproduced exactly** (weights .50/.20/.20/.10, needHours 8.0,
+     restorativeTarget .50, deepShareTarget .13, deepFloorFactor .5, neutralConsistency .5) →
+     2026-07-28 = 90.54, 2026-07-13 = 49.09, matching the persisted `metricSeries`.
+  5. **`respRateBpm` is no longer null on the 4.0** — 15/20 rows, 13.33–16.0 bpm. Memory
+     `noop-resp-rate-4-limitation` was marked superseded in part. Still null 20/20: `spo2Pct`,
+     `skinTempDevC`, `steps`.
 - 2026-07-28: **user-editable sidebar: a "Favourites" section pinned at the top** (macOS sidebar +
   iPhone More tab). New pure `Strand/App/NavFavouritesPrefs.swift` (key `nav.favourites`, comma-joined
   stable ids in display order, empty = none), modelled on `MoreSectionPrefs`. Right-click (Mac) /
