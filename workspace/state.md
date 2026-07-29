@@ -80,8 +80,16 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
   `/Applications` (never re-signed — post-install `com.noopapp.noop`, adhoc signature, `app-sandbox` +
   bluetooth entitlements and NO network client all re-checked; existing container reached, no
   onboarding). Prior bundle backed up to `~/Projects/NOOP-archive/installed-app-backup-2026-07-28/`.
-  **Still unverified:** `StrandiOS/App/RootTabView.swift` is **uncompiled** — `NOOPiOS` still has zero
-  eligible destinations on this machine (iOS platform component absent, see the 2026-07-27 entry). The
+  **Still unverified:** `StrandiOS/App/RootTabView.swift` is **uncompiled**. Ran
+  `xcodebuild -downloadPlatform iOS` (8.52 GB, iOS 26.5 runtime 23F77) — simulator destinations are now
+  eligible, closing half the 2026-07-27 gap — but the scheme then stops on a **second** missing
+  platform: *"This scheme builds an embedded Apple Watch app. watchOS 26.5 must be installed in order to
+  run the scheme."* Only watchOS 11.5 is present, so `NOOPiOS` needs a second ~8 GB
+  `-downloadPlatform watchOS`. **There is no scheme bypass**: `-target NOOPiOS -sdk iphonesimulator`
+  fails to resolve every SPM product (`NetworkImage`, `GRDB`, `StrandDesign`, `WhoopProtocol`) even
+  immediately after `-resolvePackageDependencies` reports success — SPM products only resolve through a
+  scheme. This is the same `NetworkImage` symptom noted on 2026-07-27; the cause is the bypass itself,
+  not that package. The
   one construct most likely to break, `ForEach(tupleArray, id: \.header)`, was type-checked in isolation
   against the macOS SDK and is fine; `ScreenScaffold`/`NoopCard` signatures and `.contextMenu` on a
   `NavigationLink` label remain unchecked.
