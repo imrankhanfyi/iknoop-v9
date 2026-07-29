@@ -80,19 +80,28 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
   `/Applications` (never re-signed — post-install `com.noopapp.noop`, adhoc signature, `app-sandbox` +
   bluetooth entitlements and NO network client all re-checked; existing container reached, no
   onboarding). Prior bundle backed up to `~/Projects/NOOP-archive/installed-app-backup-2026-07-28/`.
-  **Still unverified:** `StrandiOS/App/RootTabView.swift` is **uncompiled**. Ran
-  `xcodebuild -downloadPlatform iOS` (8.52 GB, iOS 26.5 runtime 23F77) — simulator destinations are now
-  eligible, closing half the 2026-07-27 gap — but the scheme then stops on a **second** missing
-  platform: *"This scheme builds an embedded Apple Watch app. watchOS 26.5 must be installed in order to
-  run the scheme."* Only watchOS 11.5 is present, so `NOOPiOS` needs a second ~8 GB
-  `-downloadPlatform watchOS`. **There is no scheme bypass**: `-target NOOPiOS -sdk iphonesimulator`
-  fails to resolve every SPM product (`NetworkImage`, `GRDB`, `StrandDesign`, `WhoopProtocol`) even
-  immediately after `-resolvePackageDependencies` reports success — SPM products only resolve through a
-  scheme. This is the same `NetworkImage` symptom noted on 2026-07-27; the cause is the bypass itself,
-  not that package. The
-  one construct most likely to break, `ForEach(tupleArray, id: \.header)`, was type-checked in isolation
-  against the macOS SDK and is fine; `ScreenScaffold`/`NoopCard` signatures and `.contextMenu` on a
-  `NavigationLink` label remain unchecked.
+  **The iOS half is compile-verified too:** `** BUILD SUCCEEDED **` for `NOOPiOS` on an iPhone 17
+  simulator (iOS 26.5). That closes the 2026-07-27 "NOOPiOS does not build on this machine" gap, and
+  the *how* is the reusable part:
+  1. `xcodebuild -downloadPlatform iOS` — 8.52 GB, iOS 26.5 runtime 23F77. `-showdestinations` went
+     from **zero eligible** to a full iPhone/iPad list.
+  2. The scheme then stops on a **second** platform: *"This scheme builds an embedded Apple Watch app.
+     watchOS 26.5 must be installed in order to run the scheme."* Only watchOS 11.5 is present.
+  3. **No watchOS download is needed.** Comment out the one `- target: NOOPWatch` line in `project.yml`
+     (the iOS target's embed, ~line 316), `xcodegen generate`, build, then
+     `git checkout -- project.yml && xcodegen generate`. Fully disposable — `Strand.xcodeproj` is
+     generated and untracked so nothing can leak into a commit; re-check
+     `grep -c com.apple.security.network.client Strand/Resources/Strand.entitlements` → 0 after the
+     final regenerate. Imran has no Apple Watch and doesn't intend to get one, so this probe is the
+     standing answer rather than a second ~8 GB `-downloadPlatform watchOS`.
+  4. What does NOT work: `-target NOOPiOS -sdk iphonesimulator` fails to resolve every SPM product
+     (`NetworkImage`, `GRDB`, `StrandDesign`, `WhoopProtocol`, `OuraProtocol`) even immediately after
+     `-resolvePackageDependencies` reports success — SPM products only resolve through a scheme. That is
+     the same `NetworkImage` symptom the 2026-07-27 entry recorded; the package was just the first error
+     alphabetically, not the cause.
+  **Still unverified:** the iOS runtime behaviour (nothing was launched in the simulator) and the macOS
+  right-click interaction — `.contextMenu` on a row inside `List(selection:).listStyle(.sidebar)` has no
+  precedent in this tree, so whether the menu opens at all is a first-use question.
   **Deliberately NOT in `CHANGELOG.md`.** An `## Unreleased` heading was tried and reverted: this
   changelog's convention is that entries land with a version bump in a release-prep commit, and a new
   top-of-file section in an upstream-tracked file is maximum conflict surface on the next rebase for a
