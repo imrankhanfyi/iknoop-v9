@@ -99,9 +99,11 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
      `-resolvePackageDependencies` reports success — SPM products only resolve through a scheme. That is
      the same `NetworkImage` symptom the 2026-07-27 entry recorded; the package was just the first error
      alphabetically, not the cause.
-  **Still unverified:** the iOS runtime behaviour (nothing was launched in the simulator) and the macOS
-  right-click interaction — `.contextMenu` on a row inside `List(selection:).listStyle(.sidebar)` has no
-  precedent in this tree, so whether the menu opens at all is a first-use question.
+  **`.contextMenu` inside a sidebar `List(selection:)` WORKS** — confirmed by Imran on the shipped
+  build. It had no precedent in this tree (the only other `.contextMenu` uses are custom rows in scroll
+  containers, `Strand/Screens/WorkoutsView.swift:1191`/`:1263`), and it was the reason the design chose
+  context-menu commands over `.onMove`, so it's worth knowing the pattern is available for future
+  sidebar work. **Still unverified:** iOS runtime behaviour — the simulator build was never launched.
   **Deliberately NOT in `CHANGELOG.md`.** An `## Unreleased` heading was tried and reverted: this
   changelog's convention is that entries land with a version bump in a release-prep commit, and a new
   top-of-file section in an upstream-tracked file is maximum conflict surface on the next rebase for a
