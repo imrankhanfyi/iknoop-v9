@@ -88,6 +88,22 @@ export.zip
 *whoop_export*.zip
 *apple_health*.zip
 
+# noop-publish (workspace/noop-phone) emits extracted biometrics: plaintext JSON,
+# gzip, and the encrypted payload. `workspace/` is tracked and `fork/no-network`
+# pushes to a private GitHub remote, so an un-ignored artifact here would violate
+# CLAUDE.md's "biometric data never goes to any git remote". Belt-and-braces: the
+# publisher also writes outside the repo by default.
+# NOTE: `dist/` below (line ~96) is UNANCHORED, so it matches at any depth and a
+# negation cannot un-ignore a file inside an ignored directory. Viewer SOURCES
+# therefore live at workspace/noop-phone/viewer/ (never under a dist/) and are
+# copied to an out-of-repo staging dir at publish time.
+workspace/noop-phone/out/
+workspace/noop-phone/**/*.sqlite
+workspace/noop-phone/**/noop-data*.json
+workspace/noop-phone/**/slim*.json
+workspace/noop-phone/**/*.json.gz
+workspace/noop-phone/**/*.bin
+
 # Python bytecode
 __pycache__/
 *.pyc

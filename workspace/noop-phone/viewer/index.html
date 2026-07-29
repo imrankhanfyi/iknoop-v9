@@ -1,0 +1,530 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NOOP</title>
+<style>
+  /* ==========================================================================================
+   * Palette — ported from Packages/StrandDesign/Sources/StrandDesign/Palette.swift
+   * (StrandPalette, "Titanium & Gold" theme, non-classic/current branch) and DomainTheme.swift.
+   * Base (no media query) = light values; @media (prefers-color-scheme: dark) overrides to dark,
+   * matching the hard constraint on how light/dark must be implemented.
+   *
+   * Recovery band colours use StrandPalette.status{Positive,Warning,Critical} (the same semantic
+   * scale RecoveryRing/StatePill use for <34 / 34-66 / >66). Sleep-stage colours are the WHOOP
+   * hypnogram set (awake/light/deep/REM) — see the accessibility note further down.
+   * ========================================================================================== */
+  :root {
+    color-scheme: light;
+    --surface-base:    #F2F2F7;
+    --surface-raised:  #FFFFFF;
+    --surface-inset:   #E9E9EE;
+    --hairline:        #D8D0BD;
+    --hairline-strong: #C7BCA4;
+    --text-primary:    #1A2230;
+    --text-secondary:  #4C5564;
+    --text-tertiary:   #7C8696;
+    --accent:          #234F9E;
+    --accent-hover:    #1C3F80;
+    --accent-muted:    #E4ECF6;
+
+    --status-positive: #1F8A5B;
+    --status-warning:  #C2792E;
+    --status-critical: #C84E1E;
+
+    /* Recovery ("Charge") ramp — bronze/red floor to champagne/green peak. */
+    --recovery-000: #C0392B;
+    --recovery-030: #D9682A;
+    --recovery-055: #C99A00;
+    --recovery-078: #6FB23A;
+    --recovery-100: #0F9D62;
+
+    /* Strain ("Effort") ramp — ember to soft amber peak. */
+    --strain-000: #7E460E;
+    --strain-033: #A4621B;
+    --strain-066: #C2792E;
+    --strain-100: #D89240;
+
+    /* Sleep stages — WHOOP hypnogram set (Palette.swift: adopted from ryanAtriumAi #988). */
+    --sleep-awake: #8E949E;
+    --sleep-light: #7B78E0;
+    --sleep-deep:  #C13EC1;
+    --sleep-rem:   #8E3BD6;
+
+    /* Per-metric accents for the Trends sparklines (each chart is single-series, so these need not
+       be mutually CVD-distinct from one another — only legible against the chart surface). */
+    --metric-cyan:       #2E92B4; /* HRV */
+    --metric-restinghr:  #3A80D6; /* zone1 */
+    --rest-color:        #5E7896; /* sleep duration */
+
+    --chart-grid: var(--hairline);
+    --chart-axis: var(--text-tertiary);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface-base:    #121518;
+      --surface-raised:  #25292C;
+      --surface-inset:   #1F2229;
+      --hairline:        #21304A;
+      --hairline-strong: #2E3C57;
+      --text-primary:    #F4F6F8;
+      --text-secondary:  #C8CFD8;
+      --text-tertiary:   #8A94A4;
+      --accent:          #60A0E0;
+      --accent-hover:    #8FBEEC;
+      --accent-muted:    #16233A;
+
+      --status-positive: #03E095;
+      --status-warning:  #F0A020;
+      --status-critical: #E0662F;
+
+      --recovery-000: #E0463C;
+      --recovery-030: #E8743C;
+      --recovery-055: #F9DF4A;
+      --recovery-078: #8FD86A;
+      --recovery-100: #03E095;
+
+      --strain-000: #9C5A14;
+      --strain-033: #C2762A;
+      --strain-066: #D98A3D;
+      --strain-100: #F0A85A;
+
+      --sleep-awake: #CAC8CB;
+      --sleep-light: #A7A4F4;
+      --sleep-deep:  #FD96FD;
+      --sleep-rem:   #AE5BEF;
+
+      --metric-cyan:      #3FA9C9;
+      --metric-restinghr: #4A90E2;
+      --rest-color:       #83A0B8;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--surface-base);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    /* The page body must never scroll horizontally; wide content scrolls in its own container. */
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  h1, h2, h3, p { margin: 0; }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * Data-age line + warning banner (rendered before any passphrase is entered — envelope-level
+   * metadata is never encrypted).
+   * ---------------------------------------------------------------------------------------- */
+  .age-line {
+    padding: 8px 16px 0;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+  .age-banner {
+    margin: 8px 16px 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--status-warning);
+    color: #1A1200;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  @media (prefers-color-scheme: dark) { .age-banner { color: #1A1200; } }
+  .age-banner[hidden] { display: none; }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * Passphrase gate
+   * ---------------------------------------------------------------------------------------- */
+  .gate {
+    max-width: 420px;
+    margin: 10vh auto 0;
+    padding: 24px;
+  }
+  .gate h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .gate-sub {
+    margin-top: 8px;
+    color: var(--text-secondary);
+    font-size: 14px;
+  }
+  .gate-form-body { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .gate input[type="password"] {
+    font-size: 16px; /* keeps iOS Safari from auto-zooming on focus */
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--hairline);
+    background: var(--surface-raised);
+    color: var(--text-primary);
+  }
+  .remember-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .gate button[type="submit"] {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 12px;
+    border-radius: 10px;
+    border: none;
+    background: var(--accent);
+    color: #FFFFFF;
+  }
+  .gate button[type="submit"]:active { background: var(--accent-hover); }
+  .gate button[type="submit"]:disabled { opacity: 0.6; }
+  .gate-error {
+    min-height: 18px;
+    color: var(--status-critical);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .remember-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * App shell
+   * ---------------------------------------------------------------------------------------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px 4px;
+  }
+  .topbar-title {
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .forget-btn {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    background: none;
+    border: 1px solid var(--hairline);
+    border-radius: 8px;
+    padding: 4px 10px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 12px;
+    overflow-x: auto; /* segmented control scrolls internally, never the page */
+    -webkit-overflow-scrolling: touch;
+    position: sticky;
+    top: 0;
+    background: var(--surface-base);
+    z-index: 10;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .tab {
+    flex: 0 0 auto;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--surface-inset);
+    border: none;
+    border-radius: 999px;
+    padding: 8px 14px;
+    white-space: nowrap;
+  }
+  .tab.active {
+    background: var(--accent);
+    color: #FFFFFF;
+  }
+
+  #main { padding: 12px 16px 32px; }
+  .panel { display: none; flex-direction: column; gap: 16px; }
+  .panel.active { display: flex; }
+
+  .empty-state {
+    color: var(--text-tertiary);
+    font-size: 14px;
+    padding: 24px 0;
+    text-align: center;
+  }
+
+  .section-date {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * Stat tiles
+   * ---------------------------------------------------------------------------------------- */
+  .tile-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .tile {
+    background: var(--surface-raised);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    padding: 14px;
+  }
+  .tile-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .tile-value {
+    margin-top: 4px;
+    font-size: 24px;
+    font-weight: 700;
+    /* Large standalone values use proportional figures, not tabular-nums (marks-and-anatomy.md). */
+    font-variant-numeric: proportional-nums;
+  }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * Cards / charts
+   * ---------------------------------------------------------------------------------------- */
+  .card {
+    background: var(--surface-raised);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    padding: 14px;
+  }
+  .card-title {
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .chart-wrap { margin-top: 8px; }
+  /* Wide/dense chart content scrolls in its own container — never the page body. */
+  /* width:100%/height:auto (not a fixed height attribute) lets the intrinsic viewBox aspect ratio
+     scale uniformly on all axes — see the comment in app.js on why preserveAspectRatio="none" was
+     removed (it stretched circular marks and rounded bar-caps into ellipses/skewed arcs). */
+  .chart-wrap svg { display: block; overflow: visible; width: 100%; height: auto; }
+  .chart-caption {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .chart-empty { padding: 12px 0; }
+  .table-toggle {
+    margin-top: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    background: none;
+    border: none;
+    padding: 4px 0;
+  }
+  .data-table, .stage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums; /* columns of numbers align vertically */
+  }
+  /* Every table's own scroll container (built in app.js's buildDataTable) — a wide table (long
+     sport names, many columns) scrolls here, never widening the page body. */
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .data-table th, .data-table td,
+  .stage-table td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .data-table th {
+    color: var(--text-tertiary);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+
+  .sparkline-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+  .sparkline-value {
+    font-size: 18px;
+    font-weight: 700;
+    font-variant-numeric: proportional-nums;
+  }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * Last night / hypnogram
+   * ---------------------------------------------------------------------------------------- */
+  .night-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .night-times { font-size: 20px; font-weight: 700; }
+  .night-arrow { color: var(--text-tertiary); font-weight: 400; }
+
+  .chip {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+  .chip-edited { background: var(--status-warning); color: #1A1200; }
+  .chip-hr { background: var(--accent-muted); color: var(--accent); }
+
+  .hyp-track {
+    display: flex;
+    height: 32px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface-inset);
+  }
+  .hyp-seg { height: 100%; }
+  /* The surface-color separator as an inset shadow, not a border: a border adds to layout width,
+     which — summed across 40-80 segments in a real night — would visibly skew the track/axis
+     alignment. box-shadow paints without consuming any width. */
+  .hyp-seg + .hyp-seg { box-shadow: inset 1px 0 0 var(--surface-raised); }
+  .hyp-wake  { background: var(--sleep-awake); }
+  .hyp-rem   { background: var(--sleep-rem); }
+  .hyp-light { background: var(--sleep-light); }
+  .hyp-deep  { background: var(--sleep-deep); }
+
+  /* Accessibility backup channel: validate_palette.js measured the deep/REM (and light/REM) pair
+     below the CVD-safe floor in this brand palette. Hue is never the ONLY channel — the legend and
+     stage table below always carry text labels too — but forced-colors / high-contrast users get a
+     texture cue as well. Never on by default (dataviz skill: texture is opt-in, never decorative). */
+  @media (forced-colors: active), (prefers-contrast: more) {
+    .hyp-deep, .hyp-rem {
+      background-image: repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.35) 0 2px, transparent 2px 6px);
+    }
+  }
+
+  .hypnogram-axis {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--chart-axis);
+  }
+  .hyp-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); }
+  .legend-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+  }
+  .stage-table { margin-top: 10px; }
+  .stage-name { display: flex; align-items: center; gap: 6px; }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * Sleep history list
+   * ---------------------------------------------------------------------------------------- */
+  .night-list { display: flex; flex-direction: column; }
+  .night-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    padding: 10px 2px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 13px;
+  }
+  .night-row-date { font-weight: 600; flex: 0 0 auto; }
+  .night-row-detail { color: var(--text-secondary); text-align: right; }
+  .night-row-empty { color: var(--text-tertiary); font-style: italic; }
+  .dim { color: var(--text-tertiary); }
+
+  /* ---------------------------------------------------------------------------------------- *
+   * Workouts
+   * ---------------------------------------------------------------------------------------- */
+  .workout-list { display: flex; flex-direction: column; gap: 10px; }
+  .workout-row {
+    background: var(--surface-raised);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 12px;
+  }
+  .workout-top {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+  .workout-mid {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .workout-sport { font-size: 16px; font-weight: 700; }
+  .workout-stats {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+
+<div id="ageBanner" class="age-banner" hidden></div>
+<div id="ageLine" class="age-line"></div>
+
+<div id="gate" class="gate">
+  <h1>NOOP</h1>
+  <p class="gate-sub">Enter your passphrase to unlock your data.</p>
+  <form id="gateForm">
+    <div class="gate-form-body">
+      <input type="password" id="passphraseInput" name="passphrase" autocomplete="current-password" placeholder="Passphrase" required>
+      <label class="remember-row">
+        <input type="checkbox" id="rememberCheckbox">
+        Remember on this device (less secure)
+      </label>
+      <button type="submit">Unlock</button>
+      <p id="gateError" class="gate-error" role="alert"></p>
+      <p class="remember-note">Remembering stores a derived key in this browser tab's session only — it clears the moment the tab closes, and never stores the passphrase itself.</p>
+    </div>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <div class="topbar-title">NOOP</div>
+    <button id="forgetBtn" class="forget-btn" type="button" hidden>Forget</button>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="today" type="button">Today</button>
+    <button class="tab" data-tab="lastnight" type="button">Last night</button>
+    <button class="tab" data-tab="history" type="button">Sleep history</button>
+    <button class="tab" data-tab="workouts" type="button">Workouts</button>
+    <button class="tab" data-tab="trends" type="button">Trends</button>
+  </nav>
+
+  <main id="main">
+    <section id="panel-today" class="panel active"></section>
+    <section id="panel-lastnight" class="panel"></section>
+    <section id="panel-history" class="panel"></section>
+    <section id="panel-workouts" class="panel"></section>
+    <section id="panel-trends" class="panel"></section>
+  </main>
+</div>
+
+<script src="app.js"></script>
