@@ -51,6 +51,25 @@ it honest:
 - **The changelog is mirrored byte-for-byte.** `Strand/System/AppChangelog.swift`,
   `android/.../ui/AppChangelog.kt` and `CHANGELOG.md` tell the same story; releases ship in lockstep.
 
+## Shared persistence keys — a contract even before every platform implements it
+
+Some values aren't computed by shared code, but their **on-disk key and shape** are still a
+cross-platform contract: the vocabulary is fixed so a future platform can read what an earlier one
+wrote, even before that platform has shipped its own reader/writer.
+
+| Key | Shape | Implemented on | Status |
+|---|---|---|---|
+| `nav.favourites` | Comma-joined list of stable destination ids, in display order (empty string = no favourites) | macOS (`NavItem.favouriteID`, `Strand/App/RootView.swift`), iOS (`MoreDestination.favouriteID`, `StrandiOS/App/RootTabView.swift`) | **Not yet implemented on Android.** The id vocabulary (`today`, `smart_alarm`, `insights_hub`, …) is deliberately shaped like Android's existing `Destination` route names so a future Kotlin twin can read the same string unchanged — but nothing crosses to Android today. |
+
+Only the **id** is the shared contract — title and icon are per-platform presentation and are free
+to diverge. iOS deliberately uses different SF Symbols than macOS for four destinations it shares
+an id with (`compare`, `stress`, `breathe`, `dataSources`); that's expected, not drift.
+
+`nav.favourites` is also deliberately **not** in the `.noopbak` backup whitelist
+(`Packages/WhoopStore/Sources/WhoopStore/BackupSettings.swift`) — like `today.sectionOrder` and
+`more.expandedSections`, it's a display arrangement rather than a profile/units value, so it's
+excluded from that closed key list.
+
 ## The `Platform.swift` shim (macOS vs iOS UI frameworks)
 
 Where macOS and iOS differ only in the *UI framework* (AppKit vs UIKit), don't fork the call site —

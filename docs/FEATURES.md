@@ -37,6 +37,14 @@ pinned to the sidebar's bottom (bonded / connecting / disconnected, with battery
 detail pane. A menu-bar item gives a glanceable live heart rate from anywhere. The whole UI is
 dark, and a first-run wizard walks you through pairing.
 
+**Favourites.** Right-click (Mac) or long-press (iPhone, in the More tab) any destination to Add
+to Favourites, then Move to Top / Move Up / Move Down / Remove from Favourites — pinning the
+screens you actually live in to an always-open Favourites section at the top of the sidebar or
+More list. A favourited row moves out of its home section rather than appearing twice; nothing is
+hidden, and every screen stays one tap or click away. iPhone can't favourite Today, Sleep or
+Trends (they're already tab-bar items, not one of the More list's destinations). Not yet on
+Android.
+
 Screens are grouped below by whether they need a connected strap:
 
 | Needs a connected strap (live BLE) | Works from imported data alone |

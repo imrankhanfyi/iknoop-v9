@@ -47,6 +47,46 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
 
 ## Recently done
 
+- 2026-07-28: **user-editable sidebar: a "Favourites" section pinned at the top** (macOS sidebar +
+  iPhone More tab). New pure `Strand/App/NavFavouritesPrefs.swift` (key `nav.favourites`, comma-joined
+  stable ids in display order, empty = none), modelled on `MoreSectionPrefs`. Right-click (Mac) /
+  long-press (iPhone) any row for Add to Favourites · Move to Top · Move Up · Move Down · Remove.
+  **Three design constraints worth remembering:**
+  1. A favourited row is **promoted, not duplicated** — a `List(selection:)` cannot carry two rows with
+     the same `.tag(item)`.
+  2. The subtraction happens **only inside `visibleItems(in:)`**, never by rebuilding `NavGroup` values
+     with a shortened `items`. The render loop branches on `group.items.count == 1` to choose bare-row
+     vs `DisclosureGroup`, so a 6-row BODY group with 5 favourites would otherwise silently lose its
+     header. This also keeps `NavGroup.all` provably unmutated, so the M5 gate
+     (`StrandTests/MoreListParityTests.swift`, every `NavItem` in exactly one group) holds by
+     construction — that test file is unchanged.
+  3. `"favourites"` is **never** inserted into `expandedGroups` (the block owns no expansion state), so
+     `initialExpandedGroups(for:)` and the `preSearchExpansion` snapshot/restore round-trip are
+     untouched. The three home-group auto-expand sites are each guarded, plus a fourth case the plan
+     missed: un-favouriting the *selected* row demotes it without firing the `selection` observer, so
+     `toggleFavourite` expands the home group on removal.
+  Ids are snake_case, shaped like Android's existing `Destination` routes (`insights_hub`,
+  `smart_alarm`, `lab_book`, `mi_band`, …) — **never** `NavItem.rawValue`, which is an English display
+  label. Deliberately absent from the `.noopbak` whitelist and **no Android twin** (display-only, no
+  stored value or scoring changes; no Android SDK here).
+  The iOS More tab's 25 hardcoded `MoreRow(...)` literals became data (`MoreDestination` gained
+  `title`/`icon`/`favouriteID`/`CaseIterable` + `static let groups`), with a `#if DEBUG` assert standing
+  in for the absent iOS test target. Its Favourites header is a plain `Text(...).strandOverline()`, NOT
+  a `moreSection(_:)` call — that helper's header writes the tapped title into the `more.expandedSections`
+  CSV, which is a byte-identical Android contract.
+  Verified: macOS `Strand` target builds; full `StrandTests` suite green (including
+  `MoreListParityTests` unmodified, plus 17 new `NavFavouritesPrefsTests` + 10 new
+  `SidebarFavouritesTests`); Release built with `CODE_SIGN_IDENTITY="-"` and `ditto`'d to
+  `/Applications` (never re-signed — post-install `com.noopapp.noop`, adhoc signature, `app-sandbox` +
+  bluetooth entitlements and NO network client all re-checked; existing container reached, no
+  onboarding). Prior bundle backed up to `~/Projects/NOOP-archive/installed-app-backup-2026-07-28/`.
+  **Still unverified:** `StrandiOS/App/RootTabView.swift` is **uncompiled** — `NOOPiOS` still has zero
+  eligible destinations on this machine (iOS platform component absent, see the 2026-07-27 entry). The
+  one construct most likely to break, `ForEach(tupleArray, id: \.header)`, was type-checked in isolation
+  against the macOS SDK and is fine; `ScreenScaffold`/`NoopCard` signatures and `.contextMenu` on a
+  `NavigationLink` label remain unchecked. The `CHANGELOG.md` entry landed under a new `## Unreleased`
+  heading — a convention this file doesn't otherwise use, and top-of-file conflict surface on the next
+  upstream rebase.
 - 2026-07-27: **renamed the branch `local/no-network` → `fork/no-network`, and closed the backup gaps.**
   The branch was always fully pushed to `personal`, but the name's "local" token (meaning *local to this
   fork*, as `CLAUDE.md` uses it for the two "local patches") read as "not pushed" and caused real

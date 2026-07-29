@@ -415,7 +415,11 @@ to the Explore / Compare / tile UI. The catalog is the contract.
    enum:
    - add a `case` to `NavItem` (its `rawValue` is the sidebar label),
    - add an SF Symbol in the `icon` switch,
-   - add the `case` to the `detail` view-builder switch that maps `NavItem` → your `View`.
+   - add the `case` to the `detail` view-builder switch that maps `NavItem` → your `View`,
+   - add the `case` to a `NavGroup` in `NavGroup.all` — `StrandTests/MoreListParityTests.swift`
+     enforces that every `NavItem` case is reachable in exactly one group,
+   - add the `case` to the `favouriteID` switch (a stable, snake_case id for the Favourites
+     feature — never derive it from `rawValue`, which is an English display label).
 3. **Keep state where it belongs.** Read through `AppModel` / `Repository`; don't reach into
    CoreBluetooth or SQLite directly from a view.
 4. **Optional features default OFF.** Anything that takes a Mac action, fires a notification, or

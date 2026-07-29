@@ -143,6 +143,50 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .testCentre: return "stethoscope"
         }
     }
+
+    /// Stable, persisted identifier for `NavFavouritesPrefs` — snake_case, deliberately shaped like the
+    /// Android `Destination` route names (`insights_hub`, `smart_alarm`, …) so a future Kotlin twin reads
+    /// the same string. NEVER derive this from `rawValue`: that is an English display label and drifts.
+    var favouriteID: String {
+        switch self {
+        case .today: return "today"
+        case .sleep: return "sleep"
+        case .workouts: return "workouts"
+        case .live: return "live"
+        case .health: return "health"
+        case .stress: return "stress"
+        case .intervals: return "intervals"
+        case .breathe: return "breathe"
+        case .intelligence: return "intelligence"
+        case .insightsHub: return "insights_hub"
+        case .coach: return "coach"
+        case .explore: return "explore"
+        case .compare: return "compare"
+        case .insights: return "insights"
+        case .labBook: return "lab_book"
+        case .rhythm: return "rhythm"
+        case .trends: return "trends"
+        case .devices: return "devices"
+        case .dataSources: return "data_sources"
+        case .appleHealth: return "apple_health"
+        // Matches the iOS `MoreDestination.miBand` case name; Android has no route for this yet.
+        case .xiaomi: return "mi_band"
+        case .backupSync: return "backup_sync"
+        case .fusedRecord: return "fused_record"
+        case .notifications: return "notifications"
+        case .automation: return "automation"
+        case .smartAlarm: return "smart_alarm"
+        case .settings: return "settings"
+        case .testCentre: return "test_centre"
+        }
+    }
+
+    /// Reverse of `favouriteID`. Deliberately NOT a second switch (that would let the two drift out of
+    /// sync) — derived from `allCases` so `favouriteID` stays the single source of truth.
+    init?(favouriteID: String) {
+        guard let match = NavItem.allCases.first(where: { $0.favouriteID == favouriteID }) else { return nil }
+        self = match
+    }
 }
 
 /// One collapsible sidebar section (S1, #805): the 27 flat `NavItem` cases are grouped into ~5
@@ -207,6 +251,11 @@ struct RootView: View {
     /// going empty to non-empty), so clearing the search puts every group back exactly as they left
     /// it. `nil` means no search is in flight; whitespace-only input never arms one.
     @State private var preSearchExpansion: Set<String>? = nil
+    /// User-pinned nav favourites (`NavFavouritesPrefs`): comma-joined ids in display order, promoted out
+    /// of their home group and pinned atop the sidebar. `@AppStorage` is a `DynamicProperty`, so this is
+    /// only ever read/decoded inside body-evaluated code (the `favourites` computed property below) —
+    /// never copied into a stored `let`.
+    @AppStorage(NavFavouritesPrefs.storageKey) private var favouritesCSV = NavFavouritesPrefs.defaultCSV
 
     /// The groups expanded at rest: every single-item group (so its lone row is visible) plus the group
     /// owning the current selection. Keeps the sidebar to "headers + the active group" as the spec asks.
@@ -215,6 +264,32 @@ struct RootView: View {
         var open = Set(NavGroup.all.filter { $0.items.count == 1 }.map(\.id))
         if let item, let g = NavGroup.group(containing: item) { open.insert(g.id) }
         return open
+    }
+
+    /// Decode the stored CSV to the favourites in display order, dropping ids this shell can't reach.
+    /// `internal` (not `private`), same reasoning as `initialExpandedGroups(for:)`: so `StrandTests` can
+    /// pin the contract headlessly via `@testable`.
+    static func favouriteItems(from csv: String) -> [NavItem] {
+        NavFavouritesPrefs.decode(csv).compactMap { NavItem(favouriteID: $0) }
+    }
+
+    /// The rows a group renders: its own items MINUS anything promoted to Favourites, then the search
+    /// filter. The subtraction happens ONLY here, never on `NavGroup.items` itself, so `group.items.count`
+    /// stays at its full size — the bare-row-vs-DisclosureGroup shape branch in `body` keys on that count,
+    /// and a synthetic subtracted `items` array would misread a favourited-down multi-item group as a
+    /// single-item one.
+    static func rows(in group: NavGroup, favourites: [NavItem], query: String) -> [NavItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remaining = group.items.filter { !favourites.contains($0) }
+        guard !trimmed.isEmpty else { return remaining }
+        return remaining.filter { $0.localizedTitle.localizedStandardContains(trimmed) }
+    }
+
+    /// The Favourites rows, search-filtered on the same predicate as any group (see `rows(in:...)`).
+    static func favouriteRows(from favourites: [NavItem], query: String) -> [NavItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return favourites }
+        return favourites.filter { $0.localizedTitle.localizedStandardContains(trimmed) }
     }
 
     var body: some View {
@@ -229,6 +304,24 @@ struct RootView: View {
                 // their one row directly so there's nothing to expand into. The `NavItem` enum is
                 // unchanged (M5 gate): only this layout that consumes it changed.
                 List(selection: $selection) {
+                    // Always-open "Favourites" block pinned at the top. Deliberately NOT a `Section`: on
+                    // macOS a `Section` header inside a `NavigationSplitView` sidebar `List` can pick up a
+                    // hover-reveal Show/Hide collapse affordance, and this block must never have a
+                    // chevron. A plain untagged header `Text`, styled like a `DisclosureGroup` label,
+                    // followed by the promoted rows (or, with no favourites yet and no active search, one
+                    // dimmed untagged hint row). Untagged rows aren't selectable in this tag-based-selection
+                    // `List`, which is exactly what we want for the header and the hint.
+                    let favs = favourites
+                    let favRows = Self.favouriteRows(from: favs, query: trimmedQuery)
+                    if !favRows.isEmpty {
+                        favouritesHeader
+                        ForEach(favRows) { sidebarRow($0) }
+                    } else if favs.isEmpty && trimmedQuery.isEmpty {
+                        favouritesHeader
+                        Text("Right-click an item to add")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
                     // One pass over NavGroup.all in data order (never split singles from multis into
                     // separate loops: ordering must survive future group additions). While a search is
                     // active each group shows only its matching rows; the bare-row vs DisclosureGroup
@@ -326,7 +419,9 @@ struct RootView: View {
         // the group that owns it is expanded so the selected row is actually visible, not hidden inside a
         // collapsed section (S1). User-driven collapses of OTHER groups are preserved.
         .onChangeCompat(of: selection) { sel in
-            if let sel, let g = NavGroup.group(containing: sel) {
+            // A promoted (favourited) item no longer lives in its home group, so expanding that group
+            // here would open a section the selected row isn't even in.
+            if let sel, !favourites.contains(sel), let g = NavGroup.group(containing: sel) {
                 expandedGroups.insert(g.id)
             }
         }
@@ -345,13 +440,19 @@ struct RootView: View {
                 guard let saved = preSearchExpansion else { return }
                 preSearchExpansion = nil
                 expandedGroups = saved
-                if let sel = selection, let g = NavGroup.group(containing: sel) {
+                // Same favourite guard as the selection observer above: a promoted item's home group
+                // shouldn't be force-expanded on its account.
+                if let sel = selection, !favourites.contains(sel), let g = NavGroup.group(containing: sel) {
                     expandedGroups.insert(g.id)
                 }
             } else {
                 if preSearchExpansion == nil { preSearchExpansion = expandedGroups }
+                // Compute hits via `Self.rows` (favourites-subtracted), not raw `group.items`, so a group
+                // whose only matches were promoted to Favourites doesn't get force-expanded on their
+                // account — it has nothing left to show.
+                let favs = favourites
                 for group in NavGroup.all
-                where group.items.contains(where: { $0.localizedTitle.localizedStandardContains(query) }) {
+                where !Self.rows(in: group, favourites: favs, query: query).isEmpty {
                     expandedGroups.insert(group.id)
                 }
             }
@@ -363,21 +464,97 @@ struct RootView: View {
         searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// The current favourites, decoded from `@AppStorage` inside body-evaluated code (see `favouritesCSV`).
+    private var favourites: [NavItem] {
+        Self.favouriteItems(from: favouritesCSV)
+    }
+
     /// A group's rows under the current filter: all of them when no search is active, otherwise the
     /// ones whose LOCALIZED title contains the query. `localizedStandardContains` gives the standard
     /// user-search semantics (case-insensitive, diacritic-insensitive, locale-aware) in one call.
     /// ALL groups filter, including single-item Today/Sleep; a group with no hits disappears entirely.
+    /// Favourited rows are promoted out of their home group here (never duplicated) — see `Self.rows`.
     private func visibleItems(in group: NavGroup) -> [NavItem] {
-        let query = trimmedQuery
-        guard !query.isEmpty else { return group.items }
-        return group.items.filter { $0.localizedTitle.localizedStandardContains(query) }
+        Self.rows(in: group, favourites: favourites, query: trimmedQuery)
+    }
+
+    /// The "FAVOURITES" header: styled exactly like a `DisclosureGroup` label, but untagged (not
+    /// selectable) and with no chevron — the block is permanently open and owns no expansion state.
+    private var favouritesHeader: some View {
+        Text("Favourites")
+            .font(StrandFont.rounded(11, weight: .semibold))
+            .foregroundStyle(StrandPalette.textTertiary)
+            .textCase(.uppercase)
     }
 
     /// One selectable destination row (same Label styling the flat list used), tagged for selection.
+    /// The context menu reads `item` from this closure's capture, NEVER from `selection` — a right-click
+    /// may or may not move `selection` first, and capturing makes that irrelevant.
     private func sidebarRow(_ item: NavItem) -> some View {
         Label(item.titleKey, systemImage: item.icon)
             .font(StrandFont.rounded(13, weight: .medium))
             .tag(item)
+            .contextMenu {
+                if favourites.contains(item) {
+                    Button {
+                        moveFavouriteToTop(item)
+                    } label: {
+                        Label("Move to Top", systemImage: "arrow.up.to.line")
+                    }
+                    Button {
+                        moveFavourite(item, by: -1)
+                    } label: {
+                        Label("Move Up", systemImage: "arrow.up")
+                    }
+                    Button {
+                        moveFavourite(item, by: 1)
+                    } label: {
+                        Label("Move Down", systemImage: "arrow.down")
+                    }
+                    Divider()
+                    Button {
+                        toggleFavourite(item)
+                    } label: {
+                        Label("Remove from Favourites", systemImage: "star.slash")
+                    }
+                } else {
+                    Button {
+                        toggleFavourite(item)
+                    } label: {
+                        Label("Add to Favourites", systemImage: "star")
+                    }
+                }
+            }
+    }
+
+    /// Pin/unpin `item` in Favourites. Both "Add to Favourites" and "Remove from Favourites" share this
+    /// one implementation — `NavFavouritesPrefs.toggling` is already the same operation either direction.
+    private func toggleFavourite(_ item: NavItem) {
+        // Un-favouriting DEMOTES the row back into its home group, and `selection` doesn't change, so the
+        // `.onChangeCompat(of: selection)` observer never fires — a selected row would land inside a
+        // collapsed group and vanish while the detail pane still shows it. Expand the home group here to
+        // keep the S1 invariant ("the selected row is always visible") holding in both directions.
+        if favourites.contains(item), selection == item, let g = NavGroup.group(containing: item) {
+            expandedGroups.insert(g.id)
+        }
+        favouritesCSV = NavFavouritesPrefs.encode(
+            NavFavouritesPrefs.toggling(item.favouriteID, in: NavFavouritesPrefs.decode(favouritesCSV))
+        )
+    }
+
+    /// Promote `item` to the first position in Favourites.
+    private func moveFavouriteToTop(_ item: NavItem) {
+        favouritesCSV = NavFavouritesPrefs.encode(
+            NavFavouritesPrefs.movingToTop(item.favouriteID, in: NavFavouritesPrefs.decode(favouritesCSV))
+        )
+    }
+
+    /// Shift `item` by `offset` positions within Favourites. Offered unconditionally from the context
+    /// menu — `NavFavouritesPrefs.moving` clamps at the ends, so this is a safe no-op there.
+    private func moveFavourite(_ item: NavItem, by offset: Int) {
+        favouritesCSV = NavFavouritesPrefs.encode(
+            NavFavouritesPrefs.moving(item.favouriteID, by: offset, in: NavFavouritesPrefs.decode(favouritesCSV))
+        )
     }
 
     /// A binding into `expandedGroups` for one group's id, so each DisclosureGroup drives the shared set.

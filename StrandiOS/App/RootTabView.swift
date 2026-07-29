@@ -40,6 +40,12 @@ struct RootTabView: View {
     @AppStorage(MoreSectionPrefs.storageKey) private var expandedMoreSectionsCSV = MoreSectionPrefs.defaultCSV
     private var expandedMoreSections: Set<String> { MoreSectionPrefs.decode(expandedMoreSectionsCSV) }
 
+    /// The user's pinned "Favourites" ids, in display order (keyed identically to the macOS `RootView`
+    /// sidebar so a future cross-platform read could share the string — nothing crosses today). Decoded
+    /// inside body-evaluated code (`NavFavouritesPrefs.decode`), never into a stored `let`: `@AppStorage`
+    /// is a `DynamicProperty`, so caching its decode would go stale across writes.
+    @AppStorage(NavFavouritesPrefs.storageKey) private var favouritesCSV = NavFavouritesPrefs.defaultCSV
+
     /// V8 liquid redesign is the default Today; the Settings toggle lets a user fall back to the classic
     /// Today if they prefer it (keyed identically to the SettingsView toggle). Default ON.
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
@@ -315,57 +321,46 @@ struct RootTabView: View {
     // ScreenScaffold for the title1 "More" + subtitle, a `SectionHeader` overline per group, and the group's
     // rows in a single grouped NoopCard with hairline dividers — the same row idiom Settings/Health use.
     private func moreTab(path: Binding<NavigationPath>, scrollSignal: Int) -> some View {
-        NavigationStack(path: path) {
+        #if DEBUG
+        // No iOS test target exists, so assert the catalogue is total at first use: every destination must
+        // appear in exactly one group, or a row silently vanishes from the More list. `moreTab` is called
+        // directly inside the `TabView` builder in `body`, so this runs on every body evaluation — at
+        // minimum once at launch, well before the user can ever reach the tab.
+        let flattened = MoreDestination.groups.flatMap(\.rows)
+        assert(flattened.count == MoreDestination.allCases.count &&
+               Set(flattened) == Set(MoreDestination.allCases),
+               "MoreDestination.groups must contain every case exactly once")
+        #endif
+        return NavigationStack(path: path) {
             ScreenScaffold(title: "More", subtitle: "Everything else, one tap away",
                            onRefresh: { await repo.refresh() },
                            topBackground: liquidScaffoldSky()) {
-                moreSection("Insights") {
-                    MoreRow("What Moves You", "wand.and.sparkles", .insightsHub)
-                    MoreRow("Intelligence", "brain.head.profile", .intelligence)
-                    MoreRow("Coach", "sparkles", .coach)
-                    MoreRow("Insights", "lightbulb.fill", .insights)
-                    MoreRow("Explore", "square.grid.2x2.fill", .explore)
-                    MoreRow("Compare", "rectangle.split.2x1.fill", .compare)
+                // Favourites (S3): a favourited row is PROMOTED out of its home section, not duplicated —
+                // decode the pinned ids fresh from the CSV every body-eval (never cached into a stored
+                // `let`; `@AppStorage` is a `DynamicProperty`) and filter them out of every section below.
+                let favouriteIDs = NavFavouritesPrefs.decode(favouritesCSV)
+                let favouriteSet = Set(favouriteIDs)
+                let favourites: [MoreDestination] = favouriteIDs.compactMap { id in
+                    // Unknown ids (a macOS-only id like a sidebar's own extra rows, or a stale id from a
+                    // row that's since been removed) are simply dropped — no crash, no placeholder row.
+                    MoreDestination.allCases.first { $0.favouriteID == id }
                 }
-                moreSection("Body") {
-                    MoreRow("Live", "waveform.path.ecg", .live)
-                    MoreRow("Workouts", "figure.run", .workouts)
-                    MoreRow("Health", "heart.text.square.fill", .health)
-                    MoreRow("Lab Book", "books.vertical.fill", .labBook)
-                    MoreRow("Stress", "bolt.heart.fill", .stress)
-                    MoreRow("Breathe", "wind", .breathe)
-                    MoreRow("Intervals", "timer", .intervals)
-                    // Experimental beat-to-beat regularity visualization — self-gates on its own consent.
-                    MoreRow("Rhythm", "waveform.path", .rhythm)
-                }
-                moreSection("Data") {
-                    MoreRow("Your Data, Fused", "square.stack.3d.up.fill", .fusedRecord)
-                    MoreRow("Apple Health", "heart.fill", .appleHealth)
-                    MoreRow("Mi Band", "figure.walk.motion", .miBand)
-                    MoreRow("Data Sources", "externaldrive.fill", .dataSources)
-                    MoreRow("Backup & Sync", "externaldrive.fill.badge.icloud", .backupSync)
-                    // #155: HealthKit-free Apple Health path for sideloaded installs (Siri Shortcut
-                    // reads the opt-in Documents/noop_sync.txt drop file).
-                    MoreRow("Shortcuts Export", "square.and.arrow.up.fill", .shortcutsExport)
-                }
-                moreSection("App") {
-                    // #805/#811: the v7.3.1 #766 alarm consolidation moved Smart Alarm under a single
-                    // "Alarms" sidebar entry (RootView .smartAlarm) but the regression dropped the row
-                    // from the iPhone More list, leaving Alarms unreachable on iPhone. Restore it here
-                    // (route to SmartAlarmView, the cross-platform iOS/macOS surface).
-                    //
-                    // Notifications (RootView .notifications) is deliberately NOT added: that screen is
-                    // macOS-only (it picks which Mac apps tap your wrist via NSWorkspace, imports AppKit,
-                    // and project.yml excludes Screens/NotificationSettingsView.swift from the iOS target),
-                    // so it can't compile or apply on iPhone. iPhone's wrist-alert controls live on the
-                    // Automations screen instead. Its absence from the iPhone More list is correct.
-                    MoreRow("Alarms", "alarm.fill", .alarms)
-                    MoreRow("Automations", "wand.and.stars", .automations)
-                    // The Test Centre (the diagnostics + bug-report hub) gets a first-class home here, not
-                    // just buried in Settings, so the feedback loop is one tap from the More tab.
-                    MoreRow("Test Centre", "stethoscope", .testCentre)
-                    MoreRow("Siri & Shortcuts", "mic.fill", .siriShortcuts)
-                    MoreRow("Settings", "gearshape.fill", .settings)
+
+                favouritesSection(favourites)
+
+                ForEach(MoreDestination.groups, id: \.header) { group in
+                    // A section whose every row is promoted disappears — header AND card together —
+                    // rather than rendering an empty, pointless group.
+                    let rows = group.rows.filter { !favouriteSet.contains($0.favouriteID) }
+                    if !rows.isEmpty {
+                        moreSection(group.header) {
+                            ForEach(rows, id: \.self) { dest in
+                                MoreRow(destination: dest, isFavourite: false) { action in
+                                    applyFavouriteAction(action, to: dest)
+                                }
+                            }
+                        }
+                    }
                 }
             }
             .toolbar(.hidden, for: .tabBar)   // we draw our own FloatingTabBar
@@ -441,16 +436,96 @@ struct RootTabView: View {
             }
         }
     }
+
+    /// The always-expanded "Favourites" block pinned at the TOP of the More index (unlike `moreSection`,
+    /// this header carries NO expansion state and is never a `Button`). `moreSection`'s header persists the
+    /// tapped title into the `more.expandedSections` CSV — a byte-identical Android contract
+    /// (`MoreSectionPrefs`) keyed on untranslated section-header strings — so a tappable "Favourites" header
+    /// would pollute that cross-platform contract with a token Android has no group for. A plain overline +
+    /// `NoopCard` avoids that entirely; there is nothing to expand or collapse.
+    ///
+    /// Rendered INSIDE the same `ScreenScaffold`/`NavigationStack` as the rest of the list (not a second nav
+    /// stack) so its `NavigationLink(value:)` rows resolve against the single
+    /// `navigationDestination(for: MoreDestination.self)` registered in `moreTab`.
+    @ViewBuilder
+    private func favouritesSection(_ favourites: [MoreDestination]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Favourites").strandOverline()
+
+            NoopCard(padding: 0) {
+                VStack(spacing: 0) {
+                    if favourites.isEmpty {
+                        // Empty state (S4): one dimmed, non-tappable hint row. Disappears the instant a
+                        // first favourite lands — there is no other transition to animate.
+                        HStack(spacing: 14) {
+                            Image(systemName: "star")
+                                .font(.system(size: 17, weight: .regular))
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .frame(width: 26, alignment: .center)
+                            Text("Touch and hold an item to add")
+                                .font(StrandFont.body)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                            Spacer(minLength: 8)
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(minHeight: 44)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ForEach(favourites, id: \.self) { dest in
+                            MoreRow(destination: dest, isFavourite: true) { action in
+                                applyFavouriteAction(action, to: dest)
+                            }
+                        }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+            }
+        }
+    }
+
+    /// Applies one context-menu command (S3) to the persisted favourites: decode the CSV → apply the pure
+    /// `NavFavouritesPrefs` mutation to the `[String]` ids → re-encode → assign back. The single
+    /// `@AppStorage` reader/writer lives here, owned by the parent — `MoreRow` never touches persistence.
+    /// `.add`/`.remove` both resolve to `toggling`, which is symmetric (adds an absent id, removes a present
+    /// one) — the two context-menu commands never fire on the wrong state, since a row is only ever offered
+    /// the command that matches its current `isFavourite`.
+    private func applyFavouriteAction(_ action: FavouriteAction, to destination: MoreDestination) {
+        let id = destination.favouriteID
+        var ids = NavFavouritesPrefs.decode(favouritesCSV)
+        switch action {
+        case .add, .remove:
+            ids = NavFavouritesPrefs.toggling(id, in: ids)
+        case .moveToTop:
+            ids = NavFavouritesPrefs.movingToTop(id, in: ids)
+        case .moveUp:
+            ids = NavFavouritesPrefs.moving(id, by: -1, in: ids)
+        case .moveDown:
+            ids = NavFavouritesPrefs.moving(id, by: 1, in: ids)
+        }
+        favouritesCSV = NavFavouritesPrefs.encode(ids)
+    }
 }
 
 /// Every screen the More index links to, as a `Hashable` value the tab's `NavigationPath` can carry
 /// (#198): a closure-destination push would bypass the path and be un-poppable on tab re-tap. The
 /// per-screen chrome the old inline links applied lives at the single `navigationDestination(for:)`
 /// registration in `moreTab`.
-private enum MoreDestination: Hashable {
+///
+/// `CaseIterable` + the `title`/`icon`/`favouriteID` below turn the More list into DATA (Favourites S1):
+/// promoting a favourited row out of its section — and hiding a section that becomes empty — needs the rows
+/// enumerable, not hardcoded `MoreRow(...)` literals scattered through `moreTab`.
+private enum MoreDestination: Hashable, CaseIterable {
     case insightsHub, intelligence, coach, insights, explore, compare
     case live, workouts, health, labBook, stress, breathe, intervals, rhythm
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport
+    // #805/#811: the v7.3.1 #766 alarm consolidation moved Smart Alarm under a single "Alarms" sidebar
+    // entry (RootView .smartAlarm) but the regression dropped the row from the iPhone More list, leaving
+    // Alarms unreachable on iPhone. Restored below (routes to SmartAlarmView, the cross-platform surface).
+    //
+    // Notifications (RootView .notifications) is deliberately NOT a case here: that screen is macOS-only
+    // (it picks which Mac apps tap your wrist via NSWorkspace, imports AppKit, and project.yml excludes
+    // Screens/NotificationSettingsView.swift from the iOS target), so it can't compile or apply on iPhone.
+    // iPhone's wrist-alert controls live on the Automations screen instead. Its absence is correct.
     case alarms, automations, testCentre, siriShortcuts, settings
 
     @ViewBuilder var destination: some View {
@@ -468,46 +543,166 @@ private enum MoreDestination: Hashable {
         case .stress:          StressView()
         case .breathe:         BreathingView()
         case .intervals:       IntervalTimerView()
+        // Experimental beat-to-beat regularity visualization — self-gates on its own consent.
         case .rhythm:          RhythmHost()
         case .fusedRecord:     FusedRecordHost()
         case .appleHealth:     AppleHealthView()
         case .miBand:          XiaomiBandView()
         case .dataSources:     DataSourcesView()
         case .backupSync:      BackupSyncView()
+        // #155: HealthKit-free Apple Health path for sideloaded installs (Siri Shortcut reads the
+        // opt-in Documents/noop_sync.txt drop file).
         case .shortcutsExport: ShortcutExportSettingsView()
         case .alarms:          SmartAlarmView()
         case .automations:     AutomationsView()
+        // The Test Centre (the diagnostics + bug-report hub) gets a first-class home here, not just
+        // buried in Settings, so the feedback loop is one tap from the More tab.
         case .testCentre:      TestCentreView()
         case .siriShortcuts:   SiriShortcutsSettingsView()
         case .settings:        SettingsView()
         }
     }
+
+    /// Row title, taken VERBATIM from the literal `MoreRow(...)` calls `moreTab` used to hardcode — not
+    /// "corrected" in any way.
+    var title: String {
+        switch self {
+        case .insightsHub:     return "What Moves You"
+        case .intelligence:    return "Intelligence"
+        case .coach:           return "Coach"
+        case .insights:        return "Insights"
+        case .explore:         return "Explore"
+        case .compare:         return "Compare"
+        case .live:            return "Live"
+        case .workouts:        return "Workouts"
+        case .health:          return "Health"
+        case .labBook:         return "Lab Book"
+        case .stress:          return "Stress"
+        case .breathe:         return "Breathe"
+        case .intervals:       return "Intervals"
+        case .rhythm:          return "Rhythm"
+        case .fusedRecord:     return "Your Data, Fused"
+        case .appleHealth:     return "Apple Health"
+        case .miBand:          return "Mi Band"
+        case .dataSources:     return "Data Sources"
+        case .backupSync:      return "Backup & Sync"
+        case .shortcutsExport: return "Shortcuts Export"
+        case .alarms:          return "Alarms"
+        case .automations:     return "Automations"
+        case .testCentre:      return "Test Centre"
+        case .siriShortcuts:   return "Siri & Shortcuts"
+        case .settings:        return "Settings"
+        }
+    }
+
+    /// SF Symbol name, taken VERBATIM from the same literals. iOS deliberately diverges from macOS on
+    /// four of these (`compare`, `stress`, `breathe`, `dataSources`) — only the `favouriteID` below is
+    /// shared cross-platform, never the icon or title.
+    var icon: String {
+        switch self {
+        case .insightsHub:     return "wand.and.sparkles"
+        case .intelligence:    return "brain.head.profile"
+        case .coach:           return "sparkles"
+        case .insights:        return "lightbulb.fill"
+        case .explore:         return "square.grid.2x2.fill"
+        case .compare:         return "rectangle.split.2x1.fill"
+        case .live:            return "waveform.path.ecg"
+        case .workouts:        return "figure.run"
+        case .health:          return "heart.text.square.fill"
+        case .labBook:         return "books.vertical.fill"
+        case .stress:          return "bolt.heart.fill"
+        case .breathe:         return "wind"
+        case .intervals:       return "timer"
+        case .rhythm:          return "waveform.path"
+        case .fusedRecord:     return "square.stack.3d.up.fill"
+        case .appleHealth:     return "heart.fill"
+        case .miBand:          return "figure.walk.motion"
+        case .dataSources:     return "externaldrive.fill"
+        case .backupSync:      return "externaldrive.fill.badge.icloud"
+        case .shortcutsExport: return "square.and.arrow.up.fill"
+        case .alarms:          return "alarm.fill"
+        case .automations:     return "wand.and.stars"
+        case .testCentre:      return "stethoscope"
+        case .siriShortcuts:   return "mic.fill"
+        case .settings:        return "gearshape.fill"
+        }
+    }
+
+    /// Stable, PLATFORM-NEUTRAL id (`NavFavouritesPrefs`'s stored vocabulary), shaped like Android's
+    /// `Destination` route names, shared with the macOS `RootView` favourites — the ONLY thing the two
+    /// shells share; title/icon are presentation and deliberately diverge.
+    var favouriteID: String {
+        switch self {
+        case .insightsHub:     return "insights_hub"
+        case .intelligence:    return "intelligence"
+        case .coach:           return "coach"
+        case .insights:        return "insights"
+        case .explore:         return "explore"
+        case .compare:         return "compare"
+        case .live:            return "live"
+        case .workouts:        return "workouts"
+        case .health:          return "health"
+        case .labBook:         return "lab_book"
+        case .stress:          return "stress"
+        case .breathe:         return "breathe"
+        case .intervals:       return "intervals"
+        case .rhythm:          return "rhythm"
+        case .fusedRecord:     return "fused_record"
+        case .appleHealth:     return "apple_health"
+        case .miBand:          return "mi_band"
+        case .dataSources:     return "data_sources"
+        case .backupSync:      return "backup_sync"
+        case .shortcutsExport: return "shortcuts_export"
+        case .alarms:          return "smart_alarm"
+        case .automations:     return "automation"
+        case .testCentre:      return "test_centre"
+        case .siriShortcuts:   return "siri_shortcuts"
+        case .settings:        return "settings"
+        }
+    }
+
+    /// Today's four More-list sections, reproduced EXACTLY (headers + row order) so `moreTab` can render
+    /// from data instead of hardcoded literals. Headers are the same literal strings `moreSection` keys the
+    /// `more.expandedSections` persisted CSV on — unchanged by this refactor.
+    static let groups: [(header: String, rows: [MoreDestination])] = [
+        ("Insights", [.insightsHub, .intelligence, .coach, .insights, .explore, .compare]),
+        ("Body", [.live, .workouts, .health, .labBook, .stress, .breathe, .intervals, .rhythm]),
+        ("Data", [.fusedRecord, .appleHealth, .miBand, .dataSources, .backupSync, .shortcutsExport]),
+        ("App", [.alarms, .automations, .testCentre, .siriShortcuts, .settings]),
+    ]
+}
+
+/// The context-menu commands offered on a More-list row (Favourites S3). `MoreRow` only reports which one
+/// fired; the parent (the sole `@AppStorage` owner) applies the pure `NavFavouritesPrefs` mutation, so
+/// `MoreRow` itself never touches persistence and doesn't need its own `@AppStorage` reader.
+private enum FavouriteAction {
+    case add, moveToTop, moveUp, moveDown, remove
 }
 
 /// One tappable destination row in the More index. A `NavigationLink` whose label is the standard app row:
 /// the SF Symbol icon tinted `StrandPalette.accent`, the title in the body text colour, a `Spacer`, and a
 /// trailing `chevron.right` in `textTertiary`. ~44pt min height + the card's row insets keep the whole row a
 /// comfortable tap target.
+///
+/// Favourites (S3): a long-press offers the Favourites context menu. `MoreRow` carries only `isFavourite`
+/// (which command set to show) + a callback reporting which one fired — never its own `@AppStorage` reader,
+/// so 25 rows don't each independently observe the favourites CSV.
 private struct MoreRow: View {
-    let title: LocalizedStringKey
-    let icon: String
-    let route: MoreDestination
-
-    init(_ title: LocalizedStringKey, _ icon: String, _ route: MoreDestination) {
-        self.title = title; self.icon = icon; self.route = route
-    }
+    let destination: MoreDestination
+    let isFavourite: Bool
+    let onFavouriteAction: (FavouriteAction) -> Void
 
     var body: some View {
-        NavigationLink(value: route) {
+        NavigationLink(value: destination) {
             HStack(spacing: 14) {
                 // Pin the icon to the accent explicitly. A plain inherited tint gets re-resolved by iOS to
                 // its default blue a beat after first render — so the icons flashed green→blue (#184). The
                 // explicit foregroundStyle on the image overrides that; the title keeps the primary colour.
-                Image(systemName: icon)
+                Image(systemName: destination.icon)
                     .font(.system(size: 17, weight: .regular))
                     .foregroundStyle(StrandPalette.accent)
                     .frame(width: 26, alignment: .center)
-                Text(title)
+                Text(LocalizedStringKey(destination.title))
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
                 Spacer(minLength: 8)
@@ -529,6 +724,27 @@ private struct MoreRow: View {
             }
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if isFavourite {
+                Button { onFavouriteAction(.moveToTop) } label: {
+                    Label("Move to Top", systemImage: "arrow.up.to.line")
+                }
+                Button { onFavouriteAction(.moveUp) } label: {
+                    Label("Move Up", systemImage: "arrow.up")
+                }
+                Button { onFavouriteAction(.moveDown) } label: {
+                    Label("Move Down", systemImage: "arrow.down")
+                }
+                Divider()
+                Button { onFavouriteAction(.remove) } label: {
+                    Label("Remove from Favourites", systemImage: "star.slash")
+                }
+            } else {
+                Button { onFavouriteAction(.add) } label: {
+                    Label("Add to Favourites", systemImage: "star")
+                }
+            }
+        }
     }
 }
 
