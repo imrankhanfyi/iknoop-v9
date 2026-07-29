@@ -84,9 +84,13 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
   eligible destinations on this machine (iOS platform component absent, see the 2026-07-27 entry). The
   one construct most likely to break, `ForEach(tupleArray, id: \.header)`, was type-checked in isolation
   against the macOS SDK and is fine; `ScreenScaffold`/`NoopCard` signatures and `.contextMenu` on a
-  `NavigationLink` label remain unchecked. The `CHANGELOG.md` entry landed under a new `## Unreleased`
-  heading — a convention this file doesn't otherwise use, and top-of-file conflict surface on the next
-  upstream rebase.
+  `NavigationLink` label remain unchecked.
+  **Deliberately NOT in `CHANGELOG.md`.** An `## Unreleased` heading was tried and reverted: this
+  changelog's convention is that entries land with a version bump in a release-prep commit, and a new
+  top-of-file section in an upstream-tracked file is maximum conflict surface on the next rebase for a
+  feature that is fork-local. The user-facing description lives in `docs/FEATURES.md`; the contract
+  lives in `docs/CROSS_PLATFORM.md`; whoever cuts a version that includes this should write the
+  changelog entry from the diff then.
 - 2026-07-27: **renamed the branch `local/no-network` → `fork/no-network`, and closed the backup gaps.**
   The branch was always fully pushed to `personal`, but the name's "local" token (meaning *local to this
   fork*, as `CLAUDE.md` uses it for the two "local patches") read as "not pushed" and caused real

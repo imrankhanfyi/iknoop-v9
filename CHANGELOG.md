@@ -17,18 +17,6 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
-## Unreleased
-
-**New**
-
-- **Favourites in the sidebar (Mac) and More tab (iPhone).** Right-click (Mac) or long-press
-  (iPhone) any destination for Add to Favourites, Move to Top, Move Up, Move Down, or Remove from
-  Favourites, pinning it to an always-open Favourites section at the top. Display-only: a
-  favourited row moves out of its home section rather than appearing twice, nothing is hidden, and
-  every screen stays reachable. Not yet on Android.
-
----
-
 ## 9.0.1: German, French & Spanish, pull-to-sync on Today, and a wave of polish (all platforms)
 
 A polish-and-translation release on top of 9.0.0.
