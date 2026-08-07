@@ -98,6 +98,13 @@ final class Collector {
         return try? await s.latestHRSampleTs(deviceId: deviceId)
     }
 
+    /// Max persisted gravity sample ts (the motion-history frontier for bounded catch-up).
+    /// nil if there's no concrete store or nothing persisted yet. Mirrors latestHRSampleTs().
+    func latestGravitySampleTs() async -> Int? {
+        guard let s = concreteStore else { return nil }
+        return try? await s.latestGravitySampleTs(deviceId: deviceId)
+    }
+
     /// Recent gravity samples for the inactivity reminder (#419): the strap's motion over `[from, to]`,
     /// the input to the shipped `SedentaryDetector`. Empty if there's no concrete store or the read
     /// throws. Mirrors latestHRSampleTs() — the BLE offload hook reads gravity through the Collector

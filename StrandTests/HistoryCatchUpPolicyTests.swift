@@ -20,6 +20,16 @@ final class HistoryCatchUpPolicyTests: XCTestCase {
             consecutiveCount: 0))
     }
 
+    /// A stale strap-reported range must not stop current-night motion catch-up when persisted live HR
+    /// proves the gravity frontier is still behind.
+    func testContinuesWhenGravityLagsLiveHrDespiteStaleRange() {
+        XCTAssertTrue(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: true,
+            gravityFrontierTs: 1_800_000_000 - 4_200,
+            hrFrontierTs: 1_800_000_000 - 30, wallNowUnix: 1_800_000_000,
+            trimAdvanced: true, consecutiveCount: 0))
+    }
+
     /// A gravity gap at or below five minutes is caught up; a frozen trim must also halt a larger gap.
     func testStopsWhenMotionCaughtUpOrTrimFrozen() {
         XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
@@ -51,6 +61,22 @@ final class HistoryCatchUpPolicyTests: XCTestCase {
         XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
             connected: true, encryptedBond: true, gravityFrontierTs: wallNow - 3_600,
             hrFrontierTs: wallNow, wallNowUnix: wallNow, trimAdvanced: true, consecutiveCount: 6))
+    }
+
+    func testMotionCatchUpStopsAtCap() {
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: true,
+            gravityFrontierTs: 1_800_000_000 - 3_600,
+            hrFrontierTs: 1_800_000_000, wallNowUnix: 1_800_000_000,
+            trimAdvanced: true, consecutiveCount: 6))
+    }
+
+    func testMotionCatchUpStopsWhenDisconnected() {
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: false, encryptedBond: true,
+            gravityFrontierTs: 1_800_000_000 - 3_600,
+            hrFrontierTs: 1_800_000_000, wallNowUnix: 1_800_000_000,
+            trimAdvanced: true, consecutiveCount: 0))
     }
 
     /// When no live-HR frontier is available, wall time remains the newer reference frontier.

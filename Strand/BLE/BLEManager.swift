@@ -550,6 +550,10 @@ public final class BLEManager: NSObject, ObservableObject {
     private var strapNewestTs: Int?
     /// Fires if the strap goes silent mid-offload; re-armed on every frame during backfill.
     private var backfillTimeout: DispatchWorkItem?
+    /// Defers a bounded current-night motion catch-up until the completed/timed-out offload has fully
+    /// unwound. Kept separate from the stale-range continuation so each has its own progress signal.
+    private var motionCatchUpWorkItem: DispatchWorkItem?
+    static let motionCatchUpDelaySeconds: TimeInterval = 1
     /// Periodic opportunistic upload while connected. Without it, upload only fires at connect +
     /// backfill-exit, so during a long live session decoded rows pile up locally and the server
     /// (dashboard) lags. Started on bond, cancelled on disconnect.
@@ -676,6 +680,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (its else path, under the cap) and on disconnect — NOT unconditionally on every HISTORY_COMPLETE,
     /// so a strap that slices one offload into many completions can't reset the cap each slice (#25).
     private var consecutiveAutoContinues = 0
+    /// Current-connection count of retries specifically caused by gravity lagging the live-HR frontier.
+    /// This uses HistoryCatchUpPolicy's separate six-pass cap and resets only on disconnect.
+    private var consecutiveMotionCatchUps = 0
     /// #364 spin-detector: the trim cursor as of the END of the previous backfill session this
     /// connection. exitBackfilling compares the current Backfiller.lastAckedTrim against this to decide
     /// whether the just-ended session actually advanced the strap's trim (progress) or froze (stop
@@ -1908,7 +1915,42 @@ public final class BLEManager: NSObject, ObservableObject {
         if reason == "timeout" || reason == "HISTORY_COMPLETE" {
             maybeAutoContinueBackfill(trimAdvanced: trimAdvanced,
                                       rowsPersisted: backfiller?.sessionRowsPersisted ?? 0)
+            scheduleMotionCatchUp(trimAdvanced: trimAdvanced)
         }
+    }
+
+    /// Read the persisted motion and HR frontiers shortly after an offload exits, then request one more
+    /// pass only when the pure policy says current-night gravity is still materially behind. The delay is
+    /// intentional: timeout callbacks never synchronously issue another offload, and any existing stale-
+    /// range continuation gets the first chance to start its independent pass.
+    private func scheduleMotionCatchUp(trimAdvanced: Bool) {
+        motionCatchUpWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.motionCatchUpWorkItem = nil
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let gravityFrontier = await self.collector?.latestGravitySampleTs()
+                let hrFrontier = await self.collector?.latestHRSampleTs()
+                let count = self.consecutiveMotionCatchUps
+                let shouldContinue = HistoryCatchUpPolicy.shouldContinue(
+                    connected: self.state.connected && self.state.bonded && !self.backfilling,
+                    encryptedBond: self.state.encryptedBond,
+                    gravityFrontierTs: gravityFrontier,
+                    hrFrontierTs: hrFrontier,
+                    wallNowUnix: Int(Date().timeIntervalSince1970),
+                    trimAdvanced: trimAdvanced,
+                    consecutiveCount: count)
+                guard shouldContinue else { return }
+                // Another trigger could have begun an offload while the async frontier reads were running.
+                guard !self.backfilling else { return }
+                self.consecutiveMotionCatchUps += 1
+                self.log("Backfill: motion frontier remains behind live HR; scheduling bounded catch-up \\(self.consecutiveMotionCatchUps)/\\(HistoryCatchUpPolicy.defaultMaxConsecutivePasses).")
+                self.requestSync(.autoContinue)
+            }
+        }
+        motionCatchUpWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.motionCatchUpDelaySeconds, execute: item)
     }
 
     /// #364 / #25: evaluate (and, if warranted, fire) an immediate back-to-back backfill after a 60s
@@ -3285,6 +3327,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // #364: the auto-continue streak + spin-detector are per-connection — a fresh connection earns a
         // fresh budget of back-to-back re-kicks and starts its trim-advance comparison from scratch.
         consecutiveAutoContinues = 0
+        consecutiveMotionCatchUps = 0
         lastSessionEndTrim = nil
         backfilling = false
         state.backfilling = false
@@ -3305,6 +3348,8 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         state.historySyncExperimental = false
         backfillTimeout?.cancel()
         backfillTimeout = nil
+        motionCatchUpWorkItem?.cancel()
+        motionCatchUpWorkItem = nil
         backfillFrameQueue.removeAll()
         backfillDraining = false
         uploadTimer?.cancel()
