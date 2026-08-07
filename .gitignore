@@ -108,6 +108,9 @@ workspace/noop-phone/**/*.bin
 __pycache__/
 *.pyc
 
+# Isolated agent worktrees (local checkout machinery, never project source)
+.worktrees/
+
 # Local release artifacts (zips/ipas built for upload; never tracked)
 dist/
 err.txt
