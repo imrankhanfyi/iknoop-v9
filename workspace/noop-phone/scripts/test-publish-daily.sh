@@ -25,9 +25,11 @@ cat > "$fake_project/.build/release/noop-publish" <<'EOF'
 #!/bin/zsh
 set -euo pipefail
 if [[ "$1" == "--self-test" ]]; then
+  print -u2 -- 'private-summary days=30 sleeps=26'
   exit 0
 fi
 [[ "$1" == "--out" ]]
+print -u2 -- 'private-summary days=30 sleeps=26'
 print -r -- '{"ciphertextB64":"sealed"}' > "$2/noop-data.json"
 EOF
 chmod +x "$fake_project/.build/release/noop-publish"
@@ -70,7 +72,11 @@ run_wrapper() {
   "$wrapper"
 }
 
-run_wrapper
+run_wrapper >"$test_root/wrapper-output" 2>&1
+if rg -q 'private-summary|days=30|sleeps=26' "$test_root/wrapper-output"; then
+  print -u2 'wrapper leaked publisher summary into its output'
+  exit 1
+fi
 
 captured_scp_source=$(<"$test_root/captured-scp-source")
 captured_ssh_command=$(<"$test_root/captured-ssh-command")

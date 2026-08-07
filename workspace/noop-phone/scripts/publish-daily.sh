@@ -14,8 +14,14 @@ tmp_dir=$(mktemp -d "$PRIVATE_TMP_ROOT/noop-phone-publish.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 cd "$PROJECT_DIR"
 swift build -c release
-.build/release/noop-publish --self-test
-.build/release/noop-publish --out "$tmp_dir"
+if ! .build/release/noop-publish --self-test >/dev/null 2>&1; then
+  print -u2 'noop-publish self-test failed'
+  exit 1
+fi
+if ! .build/release/noop-publish --out "$tmp_dir" >/dev/null 2>&1; then
+  print -u2 'noop-publish failed'
+  exit 1
+fi
 payload="$tmp_dir/noop-data.json"
 [[ -s "$payload" ]] || { print -u2 'encrypted payload missing or empty'; exit 1; }
 bytes=$(stat -f '%z' "$payload")
