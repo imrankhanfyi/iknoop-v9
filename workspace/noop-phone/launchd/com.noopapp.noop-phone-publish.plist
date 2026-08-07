@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.noopapp.noop-phone-publish</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/imrankhan/Projects/NOOP/workspace/noop-phone/scripts/publish-daily.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>15</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/imrankhan/Library/Logs/NOOP/noop-phone-publish.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/imrankhan/Library/Logs/NOOP/noop-phone-publish.err.log</string>
+</dict>
+</plist>
