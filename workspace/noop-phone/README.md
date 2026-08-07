@@ -13,8 +13,9 @@ globs this directory.
 
 ## Status
 
-`noop-publish` is **built and verified**. The viewer is built; hosting is **an open decision** — see
-"How this gets onto the phone" below, and "Remaining work" for everything that follows from it.
+`noop-publish`, the standalone viewer, and the daily encrypted publishing path are **built and
+verified**. The viewer is served privately over Tailscale HTTPS; see "How this gets onto the phone"
+for the operational handoff.
 
 **Accessibility note.** The three sleep-stage colours are NOOP's own shipped tokens
 (`StrandPalette.sleepLight`/`sleepDeep`/`sleepREM`) and they **fail** a colour-vision-deficiency
@@ -97,75 +98,41 @@ number is never mistaken for a current one.
   pushes to a private GitHub remote, so this matters: per the repo `CLAUDE.md`, biometric data never
   goes to any git remote. Prefer `--out` outside the repo entirely.
 
-## How this gets onto the phone — OPEN DECISION
+## How this gets onto the phone
 
-The original plan was to serve the viewer as a hermes dashboard plugin on the VPS. A red-team pass
-found two blockers that make that **not** work as designed:
+The viewer is deployed as a standalone static site, not as a Hermes dashboard plugin. Its files live
+in the root-owned `/srv/noop-health` directory on Freckleclaw and are served only within the tailnet:
 
-1. **`crypto.subtle` does not exist on `http://freckleclaw.tail4d0805.ts.net:9119`.** WebCrypto is
-   secure-context-only, and the tailnet serves plain HTTP. Measured in WebKit:
-   `{"origin":"http://freckleclaw...:9119","isSecureContext":false,"cryptoSubtle":"undefined"}`
-   versus `isSecureContext:true` for both `https://` and `http://127.0.0.1`. So no decryption is
-   possible over the tailnet as it is configured today.
-2. **Same-origin with an agent-writable tree.** Plugin assets are served from `/opt/data`, which the
-   hermes agent itself can write, and hermes' own `SETUP.md` says the tailnet is the *only* real
-   boundary. An agent that can rewrite `index.html` can exfiltrate the passphrase, which reduces
-   client-side encryption to theatre against precisely the adversary it was added for. Symmetrically,
-   a page same-origin with the hermes dashboard inherits its session cookie and can reach
-   `/api/env/reveal`.
+```
+https://freckleclaw.tail4d0805.ts.net:8444/
+```
 
-**These two compose into one choice, and it is yours to make:**
+Tailscale HTTPS supplies the browser secure context required by WebCrypto. Keeping the viewer outside
+the agent-writable Hermes tree means a Hermes agent cannot replace its JavaScript to capture the
+passphrase. The old plugin approach was rejected for both reasons; do not recreate it.
 
-- **(A) Enable HTTPS certs for the tailnet** (Tailscale admin console), then `tailscale serve --https`.
-  Keeps the encryption meaningful and fixes the secure-context problem. Costs one admin toggle, moves
-  the hermes dashboard onto 443, and puts the tailnet hostname into public Certificate Transparency
-  logs (the name becomes enumerable; the data stays tailnet-only). Best option, needs you.
-- **(B) Accept plaintext on the VPS.** Works tonight with no toggle — but a year of biometrics sits
-  readable in the agent's own filesystem. This is a privacy call, not a technical one, which is why it
-  was not made on your behalf.
+### Daily publishing
 
-Either way the generator and the viewer are unchanged; only where `index.html` is served differs. For
-option A the remaining work is small: a bare-iframe plugin tab wrapped in `getDerivedStateFromError`
-(the hermes SPA has **no** error boundary anywhere — a render-time throw blanks the whole dashboard
-stickily, recoverable only over SSH), with `sandbox="allow-scripts"` and **no** `allow-same-origin`.
-Note the payload must also be named `noop-data.json`, not `.bin`: hermes' asset route has a suffix
-allowlist and `.bin` 404s.
+The Mac has a Keychain item named `noop-publish` and a per-user LaunchAgent,
+`com.noopapp.noop-phone-publish`. At 08:15 in the Mac's local Pacific time (or at the next wake after
+a missed time), it runs `scripts/publish-daily.sh`. The wrapper builds and self-tests `noop-publish`,
+creates the encrypted envelope in a private `/private/tmp` directory, transfers that file only over
+SSH, then atomically replaces `/srv/noop-health/noop-data.json` on Freckleclaw.
 
-Verified and unchanged as a baseline: `tailscale serve status` on the VPS is still the single mapping
-`/ proxy http://127.0.0.1:9119`. Nothing here has touched it.
+The LaunchAgent does not wake the Mac, does not have `KeepAlive`, and writes only timestamps, build
+output, and encrypted byte counts to `~/Library/Logs/NOOP/`. A failed run leaves the previously served
+encrypted payload in place.
 
-## Remaining work — the pickup checklist
+Operational checks:
 
-Steps 1, 2 and 5 are needed under **either** option; steps 3–4 only under **(A)**.
+```bash
+launchctl print "gui/$(id -u)/com.noopapp.noop-phone-publish"
+curl --fail --silent --show-error \
+  https://freckleclaw.tail4d0805.ts.net:8444/noop-data.json -o /dev/null
+```
 
-1. **Keychain passphrase.** `security add-generic-password -s noop-publish -a "$USER"` (prompts, so it
-   never lands in shell history). Then one real publish to a path outside the repo.
-2. **launchd daily timer.** A `~/Library/LaunchAgents` plist running `noop-publish` once a morning, then
-   whatever copy step the chosen option needs. Not written yet — deliberately, since the destination
-   depends on the decision above. Note the Mac is a closed-lid laptop, so `StartCalendarInterval` will
-   fire late rather than on time; that is fine because the viewer displays the payload's age.
-3. **(A only) hermes plugin wrapper.** `/home/hermes/.hermes/plugins/noop-health/`, created
-   `hermes:hermes` — it does **not** exist yet. Contents: `dashboard/manifest.json` with
-   `"tab": {"path": "/health", "position": "after:analytics"}, "icon": "Heart"`, plus a bare-iframe
-   React tab (the pattern at `web/src/pages/DocsPage.tsx:47`). Three constraints:
-   - `sandbox="allow-scripts"` and **no** `allow-same-origin`, so the frame cannot reach the dashboard's
-     cookie-authenticated `/api/env/reveal`.
-   - Wrap the tab in its **own** `getDerivedStateFromError`. The hermes SPA has no error boundary
-     anywhere — a render-time throw blanks the entire dashboard, stickily, recoverable only over SSH.
-   - The payload must be named `noop-data.json`, **not** `.bin`: the asset route has a suffix allowlist
-     and `.bin` 404s.
-   Activate with a cookie-authenticated `/api/dashboard/plugins/rescan`, or `s6-svc -r /run/service/dashboard`.
-   **Never `docker restart hermes`, and never raw `docker exec`** — writes go through
-   `docker exec -u hermes -e HOME=/opt/data/home`, or hermes' scheduler stalls on root-owned files.
-   Register the route in hermes' `NEXT_STEPS.md` (its docs-first gate applies).
-4. **(A only) `tailscale serve --https`,** then re-check `tailscale serve status` against the recorded
-   baseline. We add no mapping of our own; the check is to prove the dashboard's `/ proxy` survived.
-5. **Load it on the actual iPhone.** Install Tailscale (the phone is **not** on the tailnet yet — only
-   `freckleclaw` 100.92.181.79 and the Mac `ik` 100.79.21.75 are), open the page, enter the passphrase,
-   Add to Home Screen. **This is the one genuine verification gap.** The viewer has been driven in a
-   headless WKWebView at 414×896 — all five tabs render, decryption succeeds, a wrong passphrase fails
-   cleanly, zero JS errors — but it has never run on the real device. Report what is seen, not what
-   should happen.
+On the iPhone, connect Tailscale, open the URL above, and enter the existing passphrase. Refreshing
+shows the latest encrypted snapshot; the viewer displays its age.
 
 Optional and separable (Phase 2 of the plan, never built): a morning recovery digest pushed to Telegram
 by the Mac with `deliver_only: true`. It inherently puts a few numbers in front of Telegram and the VPS

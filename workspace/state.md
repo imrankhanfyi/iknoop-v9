@@ -1,39 +1,26 @@
 # NOOP — working state (v9 era)
 
-_Last updated: 2026-07-29. This is the ongoing log for the active repo. Historical trail
+_Last updated: 2026-08-07. This is the ongoing log for the active repo. Historical trail
 (v1.61–v1.68) is in `~/Projects/NOOP-archive/repo-v1.61/workspace/state.md`._
 
-## NEXT PICKUP — `workspace/noop-phone/` (blocked on ONE decision, Imran's)
+## NEXT PICKUP — `workspace/noop-phone/` (deployed and scheduled)
 
-Read **`workspace/noop-phone/README.md`** first; it is the full handoff (design, the ported traps,
-the safety properties, and the open decision). This section is only the "where were we" pointer.
+Read **`workspace/noop-phone/README.md`** first; it is the full operational handoff.
 
-**Built and verified:** `noop-publish` (Mac-side Swift CLI: reads the live container store read-only,
-emits a ~36 KB encrypted `noop-data.json`) and `viewer/` (self-contained HTML/JS page that decrypts in
-the browser and renders Today / Last night / Sleep history / Workouts / Trends). 13 files, additive,
-`workspace/`-local — touches no app code and neither `fork/no-network` patch.
+**Deployed and verified:** `noop-publish` reads the live NOOP store read-only and writes an encrypted
+`noop-data.json`; the standalone viewer decrypts that file in the iPhone browser. The root-owned site
+is private to the tailnet at `https://freckleclaw.tail4d0805.ts.net:8444/`. It is deliberately not a
+Hermes dashboard plugin: Hermes can write its own tree, whereas the viewer files are root-owned.
 
-**BLOCKED on Imran choosing how the viewer is served.** A red-team pass killed the original
-"hermes dashboard plugin over the tailnet" hosting layer on two grounds, both measured:
-1. `crypto.subtle` **does not exist** on `http://freckleclaw.tail4d0805.ts.net:9119` — WebCrypto is
-   secure-context-only and the tailnet is plain HTTP. Measured `isSecureContext:false` there vs
-   `true` on `https://` and on `http://127.0.0.1`. No decryption is possible as configured today.
-2. Plugin assets are served from `/opt/data`, **the hermes agent's own writable tree**, and hermes'
-   `SETUP.md` says the tailnet is the only real boundary. An agent that can rewrite `index.html` can
-   capture the passphrase, reducing client-side encryption to theatre against exactly its threat
-   model. (Symmetrically, a page same-origin with the dashboard inherits its session cookie and can
-   reach `/api/env/reveal`.)
+**Scheduled:** `~/Library/LaunchAgents/com.noopapp.noop-phone-publish.plist` runs the reviewed
+`workspace/noop-phone/scripts/publish-daily.sh` at 08:15 local Pacific time, or when the Mac next
+wakes after a missed time. It does not wake the Mac and has no retry/KeepAlive loop. The wrapper
+transfers only the encrypted envelope, performs a remote atomic replacement, and preserves the last
+known-good payload if any stage fails. Local logs are in `~/Library/Logs/NOOP/` and exclude health
+summaries and passphrases.
 
-The two options — **(A)** enable Tailscale HTTPS certs then `tailscale serve --https`, or **(B)**
-accept plaintext biometrics on the VPS — are written up with their costs in the README. **Do not pick
-for him.** The generator and viewer are identical either way; only where `index.html` is served differs.
-
-**Remaining work once he decides** (ordered, ~an evening; the full version is in the README):
-keychain passphrase → launchd daily timer → [if A] the hermes plugin wrapper → Tailscale on the
-iPhone → **load it on the actual iPhone**. That last step is the one real verification gap: the
-viewer has been driven in a headless WKWebView at 414×896 (all 5 tabs render, decryption succeeds,
-wrong passphrase fails cleanly, zero JS errors) but **has never run on Imran's phone**. A simulated
-Safari is not his Safari.
+**Next observation only:** confirm the next natural 08:15-or-wake execution in the LaunchAgent logs.
+The real iPhone viewer has already loaded and decrypted a payload successfully.
 
 Nothing here is a NOOP.app change, so no Android twin and no migration is involved.
 
