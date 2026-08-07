@@ -390,6 +390,60 @@ struct BackfillContinuation {
     }
 }
 
+/// Decides whether motion history needs another bounded catch-up pass after the regular backfill
+/// frontier has moved. Gravity records can lag HR even while the link is otherwise healthy, so this keeps
+/// the decision independent of the strap's reported range and based only on persisted frontiers.
+///
+/// The policy is deliberately pure: the BLE scheduler supplies connection, bond, progress, and frontier
+/// facts. It permits only six consecutive passes and never chases a stalled trim cursor.
+struct HistoryCatchUpPolicy {
+    static let defaultBehindGapSeconds = 300
+    static let defaultMaxConsecutivePasses = 6
+
+    /// Continue only when gravity is more than five minutes behind the newer live-HR or wall-clock
+    /// frontier on a connected encrypted link that made trim progress. Missing gravity history means there
+    /// is no persisted motion frontier to safely compare, so the caller falls back to its normal cadence.
+    static func shouldContinue(connected: Bool,
+                               encryptedBond: Bool,
+                               gravityFrontierTs: Int?,
+                               hrFrontierTs: Int?,
+                               wallNowUnix: Int,
+                               trimAdvanced: Bool,
+                               consecutiveCount: Int,
+                               behindGapSeconds: Int = defaultBehindGapSeconds,
+                               maxConsecutivePasses: Int = defaultMaxConsecutivePasses) -> Bool {
+        guard connected, encryptedBond, trimAdvanced else { return false }
+        guard consecutiveCount < maxConsecutivePasses, let gravityFrontierTs else { return false }
+        let referenceFrontier = max(hrFrontierTs ?? Int.min, wallNowUnix)
+        return referenceFrontier - gravityFrontierTs > behindGapSeconds
+    }
+}
+
+/// Supplies the bounded delay and stop condition for an automatic encrypted-pair retry. This policy does
+/// not initiate pairing: the caller must pass its observed link state and pause explicit-auth failures.
+struct SecurePairRetryPolicy {
+    /// Returns the next bounded retry delay for a nearby partial link that still has recent standard HR.
+    /// The retry backoff is 5 min, 15 min, then one hour for every later attempt.
+    static func nextDelay(partialLink: Bool,
+                          hasRecentStandardHR: Bool,
+                          automaticRetryPaused: Bool,
+                          attemptCount: Int) -> TimeInterval? {
+        guard partialLink, hasRecentStandardHR, !automaticRetryPaused else { return nil }
+        switch attemptCount {
+        case ..<1: return 5 * 60
+        case 1: return 15 * 60
+        default: return 60 * 60
+        }
+    }
+
+    /// Explicit authentication/pairing errors and a detected bond loop must halt automatic retries.
+    static func shouldStopForAuthFailure(insufficientAuth: Bool,
+                                         peerRemovedPairing: Bool,
+                                         bondLoopPaused: Bool) -> Bool {
+        insufficientAuth || peerRemovedPairing || bondLoopPaused
+    }
+}
+
 /// #927: the "overnight only" schedule for Continuous HRV capture. When the user opts in, the dense
 /// R10/R11 + TOGGLE realtime R-R stream that continuous capture holds armed 24/7 is armed only inside a
 /// nightly window, roughly halving the battery cost (overnight is where the HRV/recovery/sleep value is;

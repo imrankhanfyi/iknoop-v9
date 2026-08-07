@@ -1,0 +1,96 @@
+import XCTest
+@testable import Strand
+
+/// Pins the pure, bounded decisions used by later BLE scheduling work. These policies deliberately
+/// depend only on facts supplied by their callers, keeping the safety-critical branches testable without
+/// CoreBluetooth or a strap.
+final class HistoryCatchUpPolicyTests: XCTestCase {
+    private let wallNow = 1_800_000_000
+
+    /// A gravity frontier more than five minutes behind the newer HR/wall-clock frontier needs another
+    /// catch-up pass, but only across an encrypted live link that is still progressing.
+    func testContinuesWhenEncryptedLinkHasMotionMoreThanFiveMinutesBehindHr() {
+        XCTAssertTrue(HistoryCatchUpPolicy.shouldContinue(
+            connected: true,
+            encryptedBond: true,
+            gravityFrontierTs: wallNow - 3_600,
+            hrFrontierTs: wallNow,
+            wallNowUnix: wallNow,
+            trimAdvanced: true,
+            consecutiveCount: 0))
+    }
+
+    /// A gravity gap at or below five minutes is caught up; a frozen trim must also halt a larger gap.
+    func testStopsWhenMotionCaughtUpOrTrimFrozen() {
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: true,
+            encryptedBond: true,
+            gravityFrontierTs: wallNow - 120,
+            hrFrontierTs: wallNow,
+            wallNowUnix: wallNow,
+            trimAdvanced: true,
+            consecutiveCount: 0))
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: true,
+            encryptedBond: true,
+            gravityFrontierTs: wallNow - 3_600,
+            hrFrontierTs: wallNow,
+            wallNowUnix: wallNow,
+            trimAdvanced: false,
+            consecutiveCount: 0))
+    }
+
+    /// The catch-up path cannot run on a disconnected or unencrypted link and cannot exceed six passes.
+    func testRequiresEncryptedConnectionAndStopsAtSixPassCap() {
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: false, encryptedBond: true, gravityFrontierTs: wallNow - 3_600,
+            hrFrontierTs: wallNow, wallNowUnix: wallNow, trimAdvanced: true, consecutiveCount: 0))
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: false, gravityFrontierTs: wallNow - 3_600,
+            hrFrontierTs: wallNow, wallNowUnix: wallNow, trimAdvanced: true, consecutiveCount: 0))
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: true, gravityFrontierTs: wallNow - 3_600,
+            hrFrontierTs: wallNow, wallNowUnix: wallNow, trimAdvanced: true, consecutiveCount: 6))
+    }
+
+    /// When no live-HR frontier is available, wall time remains the newer reference frontier.
+    func testUsesWallClockWhenItIsNewerThanHr() {
+        XCTAssertTrue(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: true, gravityFrontierTs: wallNow - 301,
+            hrFrontierTs: wallNow - 3_600, wallNowUnix: wallNow, trimAdvanced: true, consecutiveCount: 0))
+    }
+
+    /// A nearby partial link gets a bounded retry cadence: five minutes, fifteen minutes, then hourly.
+    func testPartialLinkUsesBoundedBackoff() {
+        XCTAssertEqual(SecurePairRetryPolicy.nextDelay(
+            partialLink: true, hasRecentStandardHR: true, automaticRetryPaused: false, attemptCount: 0), 300)
+        XCTAssertEqual(SecurePairRetryPolicy.nextDelay(
+            partialLink: true, hasRecentStandardHR: true, automaticRetryPaused: false, attemptCount: 1), 900)
+        XCTAssertEqual(SecurePairRetryPolicy.nextDelay(
+            partialLink: true, hasRecentStandardHR: true, automaticRetryPaused: false, attemptCount: 2), 3_600)
+        XCTAssertEqual(SecurePairRetryPolicy.nextDelay(
+            partialLink: true, hasRecentStandardHR: true, automaticRetryPaused: false, attemptCount: 99), 3_600)
+    }
+
+    /// No automatic retry is allowed without a partial nearby link and recent standard HR, or after pause.
+    func testRetryRequiresEligibleUnpausedPartialLink() {
+        XCTAssertNil(SecurePairRetryPolicy.nextDelay(
+            partialLink: false, hasRecentStandardHR: true, automaticRetryPaused: false, attemptCount: 0))
+        XCTAssertNil(SecurePairRetryPolicy.nextDelay(
+            partialLink: true, hasRecentStandardHR: false, automaticRetryPaused: false, attemptCount: 0))
+        XCTAssertNil(SecurePairRetryPolicy.nextDelay(
+            partialLink: true, hasRecentStandardHR: true, automaticRetryPaused: true, attemptCount: 0))
+    }
+
+    /// Explicit pairing failures and a loop pause stop automatic retry; an otherwise clean partial link does not.
+    func testStopsForExplicitAuthFailuresOrBondLoopPause() {
+        XCTAssertTrue(SecurePairRetryPolicy.shouldStopForAuthFailure(
+            insufficientAuth: true, peerRemovedPairing: false, bondLoopPaused: false))
+        XCTAssertTrue(SecurePairRetryPolicy.shouldStopForAuthFailure(
+            insufficientAuth: false, peerRemovedPairing: true, bondLoopPaused: false))
+        XCTAssertTrue(SecurePairRetryPolicy.shouldStopForAuthFailure(
+            insufficientAuth: false, peerRemovedPairing: false, bondLoopPaused: true))
+        XCTAssertFalse(SecurePairRetryPolicy.shouldStopForAuthFailure(
+            insufficientAuth: false, peerRemovedPairing: false, bondLoopPaused: false))
+    }
+}
