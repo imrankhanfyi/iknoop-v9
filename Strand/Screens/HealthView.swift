@@ -135,12 +135,12 @@ private struct SyncStatusSection: View {
     @EnvironmentObject var model: AppModel
 
     /// The strap link is usable for a manual offload kick (matches BLEManager.syncNow's own gate).
-    private var canSync: Bool { live.connected && live.bonded && !live.backfilling }
+    private var canSync: Bool { live.connected && live.encryptedBond && !live.backfilling }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Sync", overline: "Strap history",
-                          trailing: live.connected ? (live.bonded ? String(localized: "Connected") : String(localized: "Pairing…")) : String(localized: "Offline"))
+                          trailing: live.connected ? (live.encryptedBond ? String(localized: "Connected") : String(localized: "Pairing…")) : String(localized: "Offline"))
 
             NoopCard(tint: StrandPalette.chargeColor) {
                 VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
@@ -187,8 +187,8 @@ private struct SyncStatusSection: View {
                     .foregroundStyle(StrandPalette.textSecondary)
             }
         } else {
-            StatePill(live.bonded ? "Ready to sync" : "Pairing…",
-                      tone: .accent, showsDot: true, pulsing: !live.bonded)
+            StatePill(live.encryptedBond ? "Ready to sync" : "Pairing…",
+                      tone: .accent, showsDot: true, pulsing: !live.encryptedBond)
         }
     }
 
@@ -199,7 +199,7 @@ private struct SyncStatusSection: View {
         if !live.connected {
             return String(localized: "Connect your strap to sync its stored history. Until then, only imported data shows here.")
         }
-        if !live.bonded {
+        if !live.encryptedBond {
             return String(localized: "Finishing the pairing handshake. Sync now becomes available once the strap is paired.")
         }
         return String(localized: "Syncs your strap's stored history right away, instead of waiting for the next automatic sync.")

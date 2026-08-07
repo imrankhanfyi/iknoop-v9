@@ -7,6 +7,14 @@ import XCTest
 final class HistoryCatchUpPolicyTests: XCTestCase {
     private let wallNow = 1_800_000_000
 
+    /// A partial standard-HR link must never start historical sync; only a genuine encrypted bond can.
+    func testHistorySyncRequiresEncryptedBond() {
+        XCTAssertFalse(BLEManager.canStartHistorySync(
+            connected: true, encryptedBond: false, backfilling: false))
+        XCTAssertTrue(BLEManager.canStartHistorySync(
+            connected: true, encryptedBond: true, backfilling: false))
+    }
+
     /// A gravity frontier more than five minutes behind the newer HR/wall-clock frontier needs another
     /// catch-up pass, but only across an encrypted live link that is still progressing.
     func testContinuesWhenEncryptedLinkHasMotionMoreThanFiveMinutesBehindHr() {

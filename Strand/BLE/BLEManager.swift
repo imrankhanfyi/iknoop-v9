@@ -554,6 +554,11 @@ public final class BLEManager: NSObject, ObservableObject {
     /// unwound. Kept separate from the stale-range continuation so each has its own progress signal.
     private var motionCatchUpWorkItem: DispatchWorkItem?
     static let motionCatchUpDelaySeconds: TimeInterval = 1
+    /// One delayed retry for a 5/MG link that streams standard HR but has not established encryption.
+    /// The retry always disconnects first; `didDisconnectPeripheral` is the only place that reconnects.
+    private var securePairRetryWorkItem: DispatchWorkItem?
+    private var securePairRetryCount = 0
+    private var securePairRetryReconnectPending = false
     /// Periodic opportunistic upload while connected. Without it, upload only fires at connect +
     /// backfill-exit, so during a long live session decoded rows pile up locally and the server
     /// (dashboard) lags. Started on bond, cancelled on disconnect.
@@ -586,6 +591,11 @@ public final class BLEManager: NSObject, ObservableObject {
                                 batteryPct: Int, charging: Bool, thresholdPct: Int) -> Int {
         lowPowerThrottleActive(batteryPct: batteryPct, charging: charging, thresholdPct: thresholdPct)
             ? max(baseSeconds, lowSeconds) : baseSeconds
+    }
+
+    /// Shared engine/UI truth: history can move only over a live encrypted link that is not already syncing.
+    nonisolated static func canStartHistorySync(connected: Bool, encryptedBond: Bool, backfilling: Bool) -> Bool {
+        connected && encryptedBond && !backfilling
     }
 
     /// Keep-alive: re-arm realtime, poll battery, and bounce a stalled link so streaming
@@ -897,6 +907,12 @@ public final class BLEManager: NSObject, ObservableObject {
         installForegroundSalvageProbe()
     }
 
+    deinit {
+        securePairRetryWorkItem?.cancel()
+        securePairRetryWorkItem = nil
+        securePairRetryCount = 0
+    }
+
     /// Build the WhoopStore + Collector + Backfiller asynchronously. Safe to call multiple
     /// times — bails out early if the collector is already initialised.
     func bootstrapStore() async {
@@ -1135,6 +1151,7 @@ public final class BLEManager: NSObject, ObservableObject {
     public func disconnect() {
         intentionalDisconnect = true
         cancelScanFallback()
+        cancelSecurePairRetry(resetCount: true, reason: "explicit disconnect")
         // A user-initiated teardown is a clean slate: clear any #80 marginal-radio fallback so the next
         // (manual) reconnect attempts the full R10/R11 stream again rather than inheriting old suspicion.
         marginalRadio.reset()
@@ -2596,6 +2613,8 @@ public final class BLEManager: NSObject, ObservableObject {
     /// gate AND the BackfillPolicy rate-limiter for the trigger. On a go: records the attempt time
     /// (persisted) and starts the offload.
     func requestSync(_ trigger: BackfillTrigger) {
+        guard BLEManager.canStartHistorySync(
+            connected: state.connected, encryptedBond: state.encryptedBond, backfilling: backfilling) else { return }
         guard BLEManager.shouldRunPeriodicBackfill(
             connected: state.connected, bonded: state.bonded, backfilling: backfilling) else { return }
         let now = Date().timeIntervalSince1970
@@ -2629,16 +2648,74 @@ public final class BLEManager: NSObject, ObservableObject {
     /// sync is already running). The caller (Health screen) only enables the control while connected, so
     /// a tap is meaningful; this guard is the belt-and-braces. Mirrors the Android `WhoopBleClient.syncNow`.
     public func syncNow() {
-        guard state.connected, state.bonded else {
-            log("Sync now: no strap connected — ignored.")
-            return
-        }
-        if backfilling {
-            log("Sync now: a sync is already in progress.")
+        guard BLEManager.canStartHistorySync(
+            connected: state.connected, encryptedBond: state.encryptedBond, backfilling: backfilling) else {
+            if backfilling {
+                log("Sync now: a sync is already in progress.")
+            } else if state.connected {
+                log("Sync now: encrypted pairing is not established — ignored.")
+            } else {
+                log("Sync now: no strap connected — ignored.")
+            }
             return
         }
         log("Sync now: manual sync requested by user.")
         requestSync(.manual)
+    }
+
+    /// Arms the bounded secure-pair retry only for a 5/MG partial link that is demonstrably nearby enough
+    /// to stream standard HR. WHOOP 4 must never enter this path: its confirmed write establishes its bond.
+    private func armSecurePairRetryAfterPartialStandardHR() {
+        guard selectedModel.deviceFamily == .whoop5,
+              state.connected,
+              !state.encryptedBond,
+              securePairRetryWorkItem == nil,
+              !securePairRetryReconnectPending,
+              let delay = SecurePairRetryPolicy.nextDelay(
+                partialLink: true,
+                hasRecentStandardHR: true,
+                automaticRetryPaused: autoReconnectPausedForBondLoop,
+                attemptCount: securePairRetryCount) else { return }
+
+        log("WHOOP 5/MG: partial link detected from standard HR.")
+        let retry = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.securePairRetryWorkItem = nil
+            guard self.selectedModel.deviceFamily == .whoop5,
+                  self.state.connected,
+                  !self.state.encryptedBond,
+                  !self.intentionalDisconnect,
+                  !self.autoReconnectPausedForBondLoop else { return }
+            self.securePairRetryCount += 1
+            self.securePairRetryReconnectPending = true
+            self.log("WHOOP 5/MG: secure-pair retry firing after delayed disconnect.")
+            if let peripheral = self.peripheral {
+                self.central.cancelPeripheralConnection(peripheral)
+            } else {
+                self.securePairRetryReconnectPending = false
+            }
+        }
+        securePairRetryWorkItem = retry
+        log("WHOOP 5/MG: secure-pair retry scheduled in \(Int(delay))s.")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: retry)
+    }
+
+    private func cancelSecurePairRetry(resetCount: Bool, reason: String) {
+        let hadRetry = securePairRetryWorkItem != nil || securePairRetryReconnectPending || securePairRetryCount != 0
+        securePairRetryWorkItem?.cancel()
+        securePairRetryWorkItem = nil
+        securePairRetryReconnectPending = false
+        if resetCount { securePairRetryCount = 0 }
+        if hadRetry { log("WHOOP 5/MG: secure-pair retry cancelled (\(reason)).") }
+    }
+
+    private func resetSecurePairRetryAfterGenuineBond() {
+        let hadRetry = securePairRetryWorkItem != nil || securePairRetryReconnectPending || securePairRetryCount != 0
+        securePairRetryWorkItem?.cancel()
+        securePairRetryWorkItem = nil
+        securePairRetryReconnectPending = false
+        securePairRetryCount = 0
+        if hadRetry { log("WHOOP 5/MG: secure-pair retry reset after genuine bond.") }
     }
 
     // MARK: Helpers
@@ -3239,6 +3316,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                                didDisconnectPeripheral peripheral: CBPeripheral,
                                error: Error?) {
         Task { @MainActor in await collector?.flush() }
+        if (error as? CBError)?.code == .peerRemovedPairingInformation {
+            cancelSecurePairRetry(resetCount: true, reason: "peer removed pairing")
+        }
         // Reboot trail: if a user reboot is in flight, this drop is the strap acting on it. Log how long
         // the link stayed up (a real reboot drops within ~1-2 s) and cancel the no-disconnect watchdog. The
         // reconnect time is logged separately once the handshake completes. `rebootRequestedAt` stays set so
@@ -3287,6 +3367,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             // is real; the stale OS pairing is the problem, which the guide tells the user how to clear.
             autoReconnectPausedForBondLoop = true
             bondLoopPausedAt = Date()   // the #78 hole-4 salvage probe covers this pause too (one bounded cycle)
+            cancelSecurePairRetry(resetCount: true, reason: "bond-loop pause")
             if TestCentre.active(.connection) {
                 state.append(log: "reconnect paused=bondLoop (#617: \(postBondLoop.consecutiveBondTimeouts) bond-then-timeout cycles)", domain: .connection)
             }
@@ -3363,6 +3444,12 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         puffinEventLog.close()   // release the event-log handle so the file is safe to export
         puffinDeepBufferLog.close()   // same for the high-rate deep-buffer log (#423)
         Task { @MainActor in await collector?.flushStandardHR() }   // persist any buffered 0x2A37 HR
+        if securePairRetryReconnectPending {
+            securePairRetryReconnectPending = false
+            guard !intentionalDisconnect, !autoReconnectPausedForBondLoop else { return }
+            connectFromSystem()
+            return
+        }
         if autoReconnectPausedForBondLoop {
             // #747: the bond keeps being refused, so auto-reconnect is paused: we stop hammering a strap that
             // can't bond (the epitaph + paused hint were already surfaced when the give-up tripped). The user
@@ -3422,6 +3509,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             state.append(log: "reconnect n=\(connReconnectCount) failedConnect reason=\(reason)", domain: .connection)
         }
         if let cbErr = error as? CBError, cbErr.code == .peerRemovedPairingInformation {
+            cancelSecurePairRetry(resetCount: true, reason: "peer removed pairing")
             state.reconnectGuide = """
             Your strap's Bluetooth pairing was reset - usually by a WHOOP firmware update, or the official WHOOP app reconnecting. NOOP works fine on the new firmware; you just need to re-pair:
 
@@ -3620,6 +3708,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // "Encryption/Authentication is insufficient" and the link never authenticates. Surface
             // actionable pairing-mode guidance instead of failing silently (issue #17).
             if selectedModel.deviceFamily == .whoop5, !didBond, insufficient {
+                if SecurePairRetryPolicy.shouldStopForAuthFailure(
+                    insufficientAuth: insufficient,
+                    peerRemovedPairing: false,
+                    bondLoopPaused: autoReconnectPausedForBondLoop) {
+                    cancelSecurePairRetry(resetCount: true, reason: "insufficient authentication")
+                }
                 bondRefusalStreak += 1
                 // #78: surface the pairing-mode guidance once refusals are PERSISTENT — the strap is
                 // genuinely refusing the encrypted bond (held by the official WHOOP app, or iOS holds a
@@ -3646,6 +3740,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 if bondGiveUp.recordRefusal() {
                     autoReconnectPausedForBondLoop = true
                     bondLoopPausedAt = Date()   // starts the #78 hole-4 salvage-probe floor
+                    cancelSecurePairRetry(resetCount: true, reason: "bond-loop pause")
                     let opaque = BondRefusalGiveUp.opaqueId(fromLocalUUID: peripheral.identifier.uuidString)
                     log(BondRefusalGiveUp.epitaphLine(refusals: bondGiveUp.refusals, opaqueId: opaque))
                     state.pairingHint = BondRefusalGiveUp.pausedHint()
@@ -3689,6 +3784,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 bondGiveUp.reset()            // #747/#750: a genuine bond clears the give-up + re-arms auto-reconnect
                 autoReconnectPausedForBondLoop = false
                 bondLoopPausedAt = nil
+                resetSecurePairRetryAfterGenuineBond()
                 noteGenuineBond(of: peripheral)   // #52: this strap bonds fine; clears any pin-refusal streak
                 emitConnectionBondState("encryptedBond family=whoop5 (CLIENT_HELLO acked)")
                 log("WHOOP 5/MG: CLIENT_HELLO acked — link established; subscribing notify chars (experimental).")
@@ -3933,6 +4029,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             if selectedModel.deviceFamily == .whoop5, !state.bonded {
                 state.bonded = true
                 log("WHOOP 5/MG: live HR streaming — marking the link established (experimental).")
+                armSecurePairRetryAfterPartialStandardHR()
             }
         case BLEManager.batteryChar:
             // 0x2A19 = percent — 5/MG ONLY. The WHOOP 4.0's 0x2A19 is a stub constant 100 (real value =
