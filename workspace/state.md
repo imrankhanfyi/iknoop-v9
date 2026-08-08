@@ -1,6 +1,6 @@
 # NOOP — working state (v9 era)
 
-_Last updated: 2026-08-07. This is the ongoing log for the active repo. Historical trail
+_Last updated: 2026-08-08. This is the ongoing log for the active repo. Historical trail
 (v1.61–v1.68) is in `~/Projects/NOOP-archive/repo-v1.61/workspace/state.md`._
 
 ## NEXT PICKUP — `workspace/noop-phone/` (deployed and scheduled)
@@ -114,6 +114,26 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
    also a design-system change, so it is `ryanbr/noop`'s call, not ours.
 
 ## Recently done
+
+- 2026-08-07: **desktop history catch-up + partial secure-pair recovery** (`230ec370`,
+  `4fe11332`, `bccecf81`). Diagnosed the slow-new-day sleep result from the installed app's persisted
+  strap log: historical motion arrived in small oldest-first slices while live HR continued, and the
+  strap's reported newest-history timestamp was stale. `HistoryCatchUpPolicy` now uses the persisted
+  gravity/HR frontiers (not that stale range) to request up to six bounded delayed follow-up offloads
+  when gravity trails the newer HR/wall frontier by more than five minutes; it requires an encrypted
+  link and trim progress, and does not change protocol bytes or persist-before-ack semantics.
+  `SecurePairRetryPolicy` now retries a WHOOP 5/MG standard-HR-only partial link at 5 min, 15 min,
+  then hourly through a controlled disconnect→`didDisconnect` reconnect. It cancels on genuine bond,
+  intentional disconnect, auth/peer-removal failure, or the existing bond-loop pause. History sync and
+  its UI now require `encryptedBond`, not merely live HR. Design and implementation records:
+  `docs/superpowers/specs/2026-08-07-desktop-history-catchup-and-pair-recovery-design.md` and
+  `docs/superpowers/plans/2026-08-07-desktop-history-catchup-and-pair-recovery.md`.
+  Verified: `HistoryCatchUpPolicyTests` + `BondLoopHardeningTests`, **20 tests / 0 failures**; macOS
+  app target compile; user-run Release build succeeded; Release was installed to `/Applications/NOOP.app`
+  via `ditto` without re-signing. Pushed to `personal/fork/no-network`. **Still required:** real-strap
+  observation of the automatic partial-pair retry and an overnight motion backlog; no Android change is
+  needed because this is Apple app-layer scheduling/UI gating only, with no shared stored-value or
+  analytics change.
 
 - 2026-07-29: **`workspace/noop-phone/` — encrypted read-only NOOP viewer for the iPhone.** See the
   NEXT PICKUP section above for status and the README for the full handoff. Recording here only the

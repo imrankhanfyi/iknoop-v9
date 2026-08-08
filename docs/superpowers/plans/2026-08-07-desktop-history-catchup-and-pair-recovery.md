@@ -8,6 +8,12 @@
 
 **Tech Stack:** Swift 5, XCTest, CoreBluetooth, SwiftUI, GRDB via `WhoopStore`.
 
+**Execution record (2026-08-07):** Tasks 1–3 shipped in `230ec370`, `4fe11332`, and `bccecf81`.
+Focused `HistoryCatchUpPolicyTests` plus `BondLoopHardeningTests` passed (20 tests, 0 failures); the
+macOS target compiled and the user-run Release build was installed with `ditto` without re-signing.
+Task 4's real-strap checks remain intentionally open: observe an automatic partial-pair retry and a
+current-night motion backlog before declaring hardware validation complete.
+
 ## Global Constraints
 
 - Do not add network access, telemetry, cloud services, or destructive BLE commands.
