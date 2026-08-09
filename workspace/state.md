@@ -1,6 +1,6 @@
 # NOOP — working state (v9 era)
 
-_Last updated: 2026-08-08. This is the ongoing log for the active repo. Historical trail
+_Last updated: 2026-08-09. This is the ongoing log for the active repo. Historical trail
 (v1.61–v1.68) is in `~/Projects/NOOP-archive/repo-v1.61/workspace/state.md`._
 
 ## NEXT PICKUP — `workspace/noop-phone/` (deployed and scheduled)
@@ -114,6 +114,21 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
    also a design-system change, so it is `ryanbr/noop`'s call, not ours.
 
 ## Recently done
+
+- 2026-08-09: **overnight validation found and corrected a motion-catch-up scheduling race**
+  (`188d33e8`, reviewed). The installed build established a genuine WHOOP 4.0 bond, then persisted
+  large historical batches, but every offload timed out and gravity remained at 2026-08-07 while live
+  HR reached 2026-08-08. This was not a partial-pair case. The backfiller's session counters reflect
+  rows SQLite actually inserted, ruling out a decoded-to-dropped persistence mismatch. The new
+  catch-up check was losing to the older auto-continuation: it woke after that continuation had
+  started, returned because `backfilling` was true, and an empty continuation tail could erase the
+  original trim-progress evidence. `motionCatchUpPending` now retains that evidence across the legacy
+  chain, logs the deferral, and evaluates the request after its tail exits; it still clears on catch-up,
+  unsafe state, cap, or disconnect. The new `HistoryCatchUpPolicyTests` regression was observed red
+  (missing `nextPendingIntent`) and then green in the user-run macOS test target. **Still required:**
+  rebuild/install this follow-up, then observe a real overnight/current-night backlog reaching the
+  `motion frontier remains behind` log and advancing gravity; the contemporaneous Bluetooth-off/on
+  disruptions remain a separate radio-stability observation.
 
 - 2026-08-07: **desktop history catch-up + partial secure-pair recovery** (`230ec370`,
   `4fe11332`, `bccecf81`). Diagnosed the slow-new-day sleep result from the installed app's persisted
