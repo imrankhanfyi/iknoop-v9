@@ -8,11 +8,16 @@
 
 **Tech Stack:** Swift 5, XCTest, CoreBluetooth, SwiftUI, GRDB via `WhoopStore`.
 
-**Execution record (2026-08-07):** Tasks 1–3 shipped in `230ec370`, `4fe11332`, and `bccecf81`.
-Focused `HistoryCatchUpPolicyTests` plus `BondLoopHardeningTests` passed (20 tests, 0 failures); the
-macOS target compiled and the user-run Release build was installed with `ditto` without re-signing.
-Task 4's real-strap checks remain intentionally open: observe an automatic partial-pair retry and a
-current-night motion backlog before declaring hardware validation complete.
+**Execution record (2026-08-09):** Tasks 1–3 shipped in `230ec370`, `4fe11332`, and `bccecf81`.
+Overnight observation exposed a scheduling race, corrected in `422dccad`: a retained motion intent
+now survives a productive offload followed by a legacy continuation's empty tail. Its regression was
+observed red then green; a review found no actionable issue. The merged `fork/no-network` branch passed
+the full `Strand` macOS suite (942 tests, 0 failures, 1 environment-gated skip), then a Release build
+was installed with `ditto` without re-signing. The installed bundle was verified as `com.noopapp.noop`,
+with app-sandbox + Bluetooth entitlements and no network-client entitlement; the branch is pushed to
+`personal/fork/no-network`. Task 4's real-strap checks remain intentionally open: observe an automatic
+partial-pair retry and a current-night motion backlog logging its deferred/triggered catch-up and
+advancing gravity before declaring hardware validation complete.
 
 ## Global Constraints
 

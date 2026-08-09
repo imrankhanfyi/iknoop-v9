@@ -125,10 +125,14 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
   original trim-progress evidence. `motionCatchUpPending` now retains that evidence across the legacy
   chain, logs the deferral, and evaluates the request after its tail exits; it still clears on catch-up,
   unsafe state, cap, or disconnect. The new `HistoryCatchUpPolicyTests` regression was observed red
-  (missing `nextPendingIntent`) and then green in the user-run macOS test target. **Still required:**
-  rebuild/install this follow-up, then observe a real overnight/current-night backlog reaching the
-  `motion frontier remains behind` log and advancing gravity; the contemporaneous Bluetooth-off/on
-  disruptions remain a separate radio-stability observation.
+  (missing `nextPendingIntent`) and then green in the user-run macOS test target. The merged production
+  branch then passed the full `Strand` suite (**942 tests, 0 failures, 1 environment-gated skip**), and
+  a successful Release build was installed to `/Applications/NOOP.app` via `ditto` without re-signing.
+  Post-install verification confirmed `com.noopapp.noop`, app sandbox + Bluetooth entitlements, and no
+  network-client entitlement; `422dccad` and this record are pushed to `personal/fork/no-network`.
+  **Still required:** observe a real overnight/current-night backlog reaching the `motion catch-up
+  remains pending` then `motion frontier remains behind` logs and advancing gravity; the contemporaneous
+  Bluetooth-off/on disruptions remain a separate radio-stability observation.
 
 - 2026-08-07: **desktop history catch-up + partial secure-pair recovery** (`230ec370`,
   `4fe11332`, `bccecf81`). Diagnosed the slow-new-day sleep result from the installed app's persisted
