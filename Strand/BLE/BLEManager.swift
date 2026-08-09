@@ -400,6 +400,13 @@ struct HistoryCatchUpPolicy {
     static let defaultBehindGapSeconds = 300
     static let defaultMaxConsecutivePasses = 6
 
+    /// Keep a current-night catch-up request alive once any completed offload has made cursor progress.
+    /// A regular continuation may run between that productive exit and the motion check; its empty tail
+    /// must not erase the original evidence that another bounded pass is safe to attempt.
+    static func nextPendingIntent(existingIntent: Bool, exitedSessionAdvancedTrim: Bool) -> Bool {
+        existingIntent || exitedSessionAdvancedTrim
+    }
+
     /// Continue only when gravity is more than five minutes behind the newer live-HR or wall-clock
     /// frontier on a connected encrypted link that made trim progress. Missing gravity history means there
     /// is no persisted motion frontier to safely compare, so the caller falls back to its normal cadence.
@@ -693,6 +700,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Current-connection count of retries specifically caused by gravity lagging the live-HR frontier.
     /// This uses HistoryCatchUpPolicy's separate six-pass cap and resets only on disconnect.
     private var consecutiveMotionCatchUps = 0
+    /// A productive offload has left motion materially behind. Retained across a regular continuation so
+    /// its empty tail cannot discard the current-night catch-up opportunity before it is evaluated.
+    private var motionCatchUpPending = false
     /// #364 spin-detector: the trim cursor as of the END of the previous backfill session this
     /// connection. exitBackfilling compares the current Backfiller.lastAckedTrim against this to decide
     /// whether the just-ended session actually advanced the strap's trim (progress) or froze (stop
@@ -1941,26 +1951,38 @@ public final class BLEManager: NSObject, ObservableObject {
     /// intentional: timeout callbacks never synchronously issue another offload, and any existing stale-
     /// range continuation gets the first chance to start its independent pass.
     private func scheduleMotionCatchUp(trimAdvanced: Bool) {
+        motionCatchUpPending = HistoryCatchUpPolicy.nextPendingIntent(
+            existingIntent: motionCatchUpPending,
+            exitedSessionAdvancedTrim: trimAdvanced)
+        guard motionCatchUpPending else { return }
         motionCatchUpWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.motionCatchUpWorkItem = nil
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                guard !self.backfilling else {
+                    self.log("Backfill: motion catch-up remains pending while regular continuation is active.")
+                    return
+                }
                 let gravityFrontier = await self.collector?.latestGravitySampleTs()
                 let hrFrontier = await self.collector?.latestHRSampleTs()
                 let count = self.consecutiveMotionCatchUps
                 let shouldContinue = HistoryCatchUpPolicy.shouldContinue(
-                    connected: self.state.connected && self.state.bonded && !self.backfilling,
+                    connected: self.state.connected && self.state.bonded,
                     encryptedBond: self.state.encryptedBond,
                     gravityFrontierTs: gravityFrontier,
                     hrFrontierTs: hrFrontier,
                     wallNowUnix: Int(Date().timeIntervalSince1970),
-                    trimAdvanced: trimAdvanced,
+                    trimAdvanced: self.motionCatchUpPending,
                     consecutiveCount: count)
-                guard shouldContinue else { return }
+                guard shouldContinue else {
+                    self.motionCatchUpPending = false
+                    return
+                }
                 // Another trigger could have begun an offload while the async frontier reads were running.
                 guard !self.backfilling else { return }
+                self.motionCatchUpPending = false
                 self.consecutiveMotionCatchUps += 1
                 self.log("Backfill: motion frontier remains behind live HR; scheduling bounded catch-up \\(self.consecutiveMotionCatchUps)/\\(HistoryCatchUpPolicy.defaultMaxConsecutivePasses).")
                 self.requestSync(.autoContinue)
@@ -3409,6 +3431,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // fresh budget of back-to-back re-kicks and starts its trim-advance comparison from scratch.
         consecutiveAutoContinues = 0
         consecutiveMotionCatchUps = 0
+        motionCatchUpPending = false
         lastSessionEndTrim = nil
         backfilling = false
         state.backfilling = false

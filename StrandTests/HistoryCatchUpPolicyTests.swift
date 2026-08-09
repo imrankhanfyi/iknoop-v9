@@ -38,6 +38,17 @@ final class HistoryCatchUpPolicyTests: XCTestCase {
             trimAdvanced: true, consecutiveCount: 0))
     }
 
+    /// A legacy continuation can consume an otherwise productive offload before the motion check gets
+    /// a turn. Its empty tail must not discard the pending current-night catch-up request.
+    func testKeepsPendingMotionCatchUpAcrossNonAdvancingLegacyTail() {
+        XCTAssertTrue(HistoryCatchUpPolicy.nextPendingIntent(
+            existingIntent: true, exitedSessionAdvancedTrim: false))
+        XCTAssertTrue(HistoryCatchUpPolicy.nextPendingIntent(
+            existingIntent: false, exitedSessionAdvancedTrim: true))
+        XCTAssertFalse(HistoryCatchUpPolicy.nextPendingIntent(
+            existingIntent: false, exitedSessionAdvancedTrim: false))
+    }
+
     /// A gravity gap at or below five minutes is caught up; a frozen trim must also halt a larger gap.
     func testStopsWhenMotionCaughtUpOrTrimFrozen() {
         XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
