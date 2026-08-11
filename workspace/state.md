@@ -1,7 +1,50 @@
 # NOOP — working state (v9 era)
 
-_Last updated: 2026-08-09. This is the ongoing log for the active repo. Historical trail
+_Last updated: 2026-08-11. This is the ongoing log for the active repo. Historical trail
 (v1.61–v1.68) is in `~/Projects/NOOP-archive/repo-v1.61/workspace/state.md`._
+
+## NEXT PICKUP — upstream maintenance assessment (2026-08-11; research only)
+
+The fork is based on **v9.0.1** plus local commits through `49c150b7`; upstream `origin/main` was
+fetched read-only on 2026-08-11 and is substantially ahead (stable release **v9.3.1**, with a v9.3.2
+testing build). **Do not wholesale rebase/update the installed daily-driver build yet.** The upstream
+BLE/offload changes overlap the locally validated sentinel-motion retry and catch-up scheduling work.
+First observe two more ordinary mornings; only then take changes in small, independently verified
+batches.
+
+Priority order for the next implementation session:
+
+1. **R-R emission ordering / HRV correctness — take first.** Upstream `34c66b66` fixes same-second
+   R-R intervals being ordered by magnitude rather than strap emission order. That can bias RMSSD,
+   affecting historical HRV, recovery, sleep HRV, stress, and Insights. It includes a storage migration
+   and broad Swift/Kotlin tests. Expect legitimate historical value changes; make that explicit to the
+   user. Do it as a versioned migration with its upstream tests, not a hand patch.
+2. **Reconcile newer BLE empty-offload safeguards — high value, but never cherry-pick blind.** Review
+   upstream `30921136`, `74454a40`, `d7e8a3b0`, and nearby post-offload work against our local commits
+   `230ec370` → `384e04a1`. Preserve the local sentinel behaviour proven on 2026-08-11: even while
+   `cursors.strap_trim == UInt32.max`, the bounded no-cursor retry persisted and scored the 2026-08-10
+   night (22:18–06:28). Port compatible guards and tests only, then validate on the real WHOOP 4.0.
+3. **Measured sleep-stage transition rule — useful separate follow-up.** Upstream `98d1d1ff` strongly
+   discourages wake→deep/REM transitions. It has restrained validation and deliberately excludes a
+   larger unvalidated retune. It can change stages/totals, so compare several historical nights before
+   installing and keep it separate from sync work.
+4. **Effort accuracy — separate follow-up if training scores matter.** Upstream `85cc0b4f` weights each
+   HR reading by its actual time gap (with a 2-min ceiling); the associated upstream follow-up scores
+   saved workouts using measured resting HR rather than a hard-coded 60. This corrects uneven streams
+   and may revise Effort/calories, but is lower priority than HRV and BLE reliability.
+5. **Latest-HR SQLite query shape — safe maintenance item, no longer urgent.** Upstream `495f25d3`
+   rewrites a `MAX` over a `UNION` so SQLite can seek each stream. It was 4.3–5.8 s on their 746 MB
+   store. Our live store was compacted losslessly on 2026-08-10 from 729 MB to ~355 MB; the equivalent
+   query measured below 0.01 s on 2026-08-11. Take it in a later storage-maintenance batch, not as a
+   response to a current load problem.
+6. **Optional privacy UX:** upstream v9.3.0 warns that `.noopbak` archives are readable/unencrypted and
+   retains scheduled debug exports. Worth adopting if those features are used; it does not replace the
+   existing rule that biometric/personal data never goes to git.
+
+Not priorities for this Mac/WHOOP-4.0 user: Android-only/iOS-widget work, Oura work, WHOOP 5/MG
+protocol probes, or AI Coach (the latter conflicts with this fork's permanent zero-network guarantee).
+The tracker-recovery plist under `workspace/recovery/` remains deliberately untracked because it
+contains personal health/medication tracker data.
 
 ## NEXT PICKUP — `workspace/noop-phone/` (deployed and scheduled)
 
