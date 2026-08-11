@@ -552,6 +552,28 @@ extension WhoopStore {
                 t.primaryKey(["deviceId", "ts"])
             }
         }
+        // v28: lossless storage compaction. These high-volume streams were ordinary rowid tables
+        // with a composite PRIMARY KEY, so SQLite stored each TEXT deviceId/timestamp key twice:
+        // once in the row table and again in its autoindex. WITHOUT ROWID makes that existing key
+        // the table b-tree. Every column and key order is preserved; this is deliberately NOT a
+        // retention policy and does not delete or downsample any biometric history.
+        migrator.registerMigration("v28-sensor-without-rowid") { db in
+            let rebuilds: [(String, String, String)] = [
+                ("hrSample", "deviceId TEXT NOT NULL, ts INTEGER NOT NULL, bpm INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (deviceId, ts)", "deviceId, ts, bpm, synced"),
+                ("rrInterval", "deviceId TEXT NOT NULL, ts INTEGER NOT NULL, rrMs INTEGER NOT NULL, seq INTEGER NOT NULL DEFAULT 0, synced INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (deviceId, ts, rrMs, seq)", "deviceId, ts, rrMs, seq, synced"),
+                ("spo2Sample", "deviceId TEXT NOT NULL, ts INTEGER NOT NULL, red INTEGER NOT NULL, ir INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (deviceId, ts)", "deviceId, ts, red, ir, synced"),
+                ("skinTempSample", "deviceId TEXT NOT NULL, ts INTEGER NOT NULL, raw INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (deviceId, ts)", "deviceId, ts, raw, synced"),
+                ("respSample", "deviceId TEXT NOT NULL, ts INTEGER NOT NULL, raw INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (deviceId, ts)", "deviceId, ts, raw, synced"),
+                ("gravitySample", "deviceId TEXT NOT NULL, ts INTEGER NOT NULL, x DOUBLE NOT NULL, y DOUBLE NOT NULL, z DOUBLE NOT NULL, synced INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (deviceId, ts)", "deviceId, ts, x, y, z, synced"),
+                ("ppgWaveformSample", "deviceId TEXT NOT NULL, ts INTEGER NOT NULL, samples BLOB NOT NULL, PRIMARY KEY (deviceId, ts)", "deviceId, ts, samples")
+            ]
+            for (table, columns, copyColumns) in rebuilds {
+                try db.execute(sql: "CREATE TABLE \(table)_v28 (\(columns)) WITHOUT ROWID")
+                try db.execute(sql: "INSERT INTO \(table)_v28 (\(copyColumns)) SELECT \(copyColumns) FROM \(table)")
+                try db.execute(sql: "DROP TABLE \(table)")
+                try db.execute(sql: "ALTER TABLE \(table)_v28 RENAME TO \(table)")
+            }
+        }
         return migrator
     }
 }

@@ -4,6 +4,30 @@ import WhoopProtocol
 @testable import WhoopStore
 
 final class MigrationTests: XCTestCase {
+    func testV28RebuildsHighVolumeStreamsWithoutRowidAndPreservesRows() async throws {
+        let dbQueue = try DatabaseQueue()
+        try WhoopStore.makeMigrator().migrate(dbQueue, upTo: "v27-ppg-waveform")
+        try await dbQueue.write { db in
+            try db.execute(sql: "INSERT INTO hrSample (deviceId, ts, bpm, synced) VALUES ('d', 1, 60, 1)")
+            try db.execute(sql: "INSERT INTO rrInterval (deviceId, ts, rrMs, seq, synced) VALUES ('d', 2, 800, 1, 0)")
+            try db.execute(sql: "INSERT INTO spo2Sample (deviceId, ts, red, ir, synced) VALUES ('d', 3, 4, 5, 0)")
+            try db.execute(sql: "INSERT INTO skinTempSample (deviceId, ts, raw, synced) VALUES ('d', 4, 6, 0)")
+            try db.execute(sql: "INSERT INTO respSample (deviceId, ts, raw, synced) VALUES ('d', 5, 7, 0)")
+            try db.execute(sql: "INSERT INTO gravitySample (deviceId, ts, x, y, z, synced) VALUES ('d', 6, 1, 2, 3, 0)")
+            try db.execute(sql: "INSERT INTO ppgWaveformSample (deviceId, ts, samples) VALUES ('d', 7, X'0102')")
+        }
+        try WhoopStore.makeMigrator().migrate(dbQueue)
+        try await dbQueue.read { db in
+            for table in ["hrSample", "rrInterval", "spo2Sample", "skinTempSample", "respSample", "gravitySample", "ppgWaveformSample"] {
+                XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(table)"), 1)
+                let sql = try String.fetchOne(db, sql: "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", arguments: [table]) ?? ""
+                XCTAssertTrue(sql.uppercased().contains("WITHOUT ROWID"), "\(table) must be rowidless")
+            }
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT bpm FROM hrSample WHERE deviceId = 'd' AND ts = 1"), 60)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT seq FROM rrInterval WHERE deviceId = 'd' AND ts = 2"), 1)
+        }
+    }
+
     func testInMemoryRunsMigrations() async throws {
         let store = try await WhoopStore.inMemory()
         let tables = try await store.tableNames()
