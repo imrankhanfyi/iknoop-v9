@@ -98,6 +98,26 @@ final class HistoryCatchUpPolicyTests: XCTestCase {
             trimAdvanced: true, consecutiveCount: 0))
     }
 
+    /// WHOOP 4 can acknowledge a productive offload with the no-cursor sentinel repeatedly. In that
+    /// narrow case, persisted motion rows are a bounded fallback progress signal; an empty retry stops.
+    func testSentinelMotionProgressGetsThreeBoundedCatchUpsWithoutTrimAdvance() {
+        XCTAssertTrue(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: true,
+            gravityFrontierTs: wallNow - 3_600, hrFrontierTs: wallNow,
+            wallNowUnix: wallNow, trimAdvanced: false,
+            sentinelMotionProgress: true, consecutiveCount: 0))
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: true,
+            gravityFrontierTs: wallNow - 3_600, hrFrontierTs: wallNow,
+            wallNowUnix: wallNow, trimAdvanced: false,
+            sentinelMotionProgress: false, consecutiveCount: 0))
+        XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
+            connected: true, encryptedBond: true,
+            gravityFrontierTs: wallNow - 3_600, hrFrontierTs: wallNow,
+            wallNowUnix: wallNow, trimAdvanced: false,
+            sentinelMotionProgress: true, consecutiveCount: 3))
+    }
+
     /// When no live-HR frontier is available, wall time remains the newer reference frontier.
     func testUsesWallClockWhenItIsNewerThanHr() {
         XCTAssertTrue(HistoryCatchUpPolicy.shouldContinue(

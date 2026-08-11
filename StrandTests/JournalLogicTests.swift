@@ -7,6 +7,14 @@ import WhoopStore
 /// keys to the effects engines on both sides.
 final class JournalLogicTests: XCTestCase {
 
+    @MainActor
+    private func isolatedDefaults() -> UserDefaults {
+        let suite = "JournalLogicTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
     private func e(_ day: String, _ q: String, _ yes: Bool) -> JournalEntry {
         JournalEntry(day: day, question: q, answeredYes: yes, notes: nil)
     }
@@ -103,7 +111,7 @@ final class JournalLogicTests: XCTestCase {
         // THE key-stability guarantee (#322): renaming an item changes only the display label; the
         // stored canonical (the DB/engine join key) is untouched, so all logged + imported history, 
         // which is keyed on the canonical question string, still lines up after a rename.
-        let store = JournalCatalogStore()
+        let store = JournalCatalogStore(defaults: isolatedDefaults())
         store.items = []   // start from a clean catalog for a deterministic assertion
         let canonical = "Did you have caffeine late in the day?"
 
@@ -136,7 +144,7 @@ final class JournalLogicTests: XCTestCase {
 
     @MainActor
     func testSetGroupAndKindPreserveCanonical() {
-        let store = JournalCatalogStore()
+        let store = JournalCatalogStore(defaults: isolatedDefaults())
         store.items = []
         let canonical = "Did you take magnesium?"
         store.setGroup(canonical, to: .supplements)
@@ -150,7 +158,7 @@ final class JournalLogicTests: XCTestCase {
 
     @MainActor
     func testResolvedItemsGroupStartersByDefaultAndDropHidden() {
-        let store = JournalCatalogStore()
+        let store = JournalCatalogStore(defaults: isolatedDefaults())
         store.items = []
         let resolved = store.resolvedItems(imported: [], includeHidden: false)
         // Every starter is present with a default group and .bool kind.
@@ -168,13 +176,32 @@ final class JournalLogicTests: XCTestCase {
 
     @MainActor
     func testAddCustomNumericItem() {
-        let store = JournalCatalogStore()
+        let store = JournalCatalogStore(defaults: isolatedDefaults())
         store.items = []
         store.addCustom("Water (L)", kind: .numeric(unitLabel: "L"), group: .nutrition)
         XCTAssertTrue(store.isCustom("Water (L)"))
         let item = store.item(for: "Water (L)")
         XCTAssertEqual(item?.group, .nutrition)
         XCTAssertEqual(item?.kind.unitLabel, "L")
+    }
+
+    @MainActor
+    func testCatalogMutationsCanUseAnIsolatedDefaultsDomain() {
+        // Regression: running StrandTests must never mutate the user's live
+        // com.noopapp.noop preferences catalogue.
+        let suite = "JournalLogicTests.catalog.\(UUID().uuidString)"
+        let isolated = try! XCTUnwrap(UserDefaults(suiteName: suite))
+        isolated.removePersistentDomain(forName: suite)
+        defer { isolated.removePersistentDomain(forName: suite) }
+
+        let liveKey = "journal.catalog.v2"
+        let liveBefore = UserDefaults.standard.data(forKey: liveKey)
+        let store = JournalCatalogStore(defaults: isolated)
+        store.addCustom("Test-only tracker")
+
+        XCTAssertTrue(store.isCustom("Test-only tracker"))
+        XCTAssertNotNil(isolated.data(forKey: liveKey))
+        XCTAssertEqual(UserDefaults.standard.data(forKey: liveKey), liveBefore)
     }
 
     func testNumericJournalKeyIsNamespaced() {

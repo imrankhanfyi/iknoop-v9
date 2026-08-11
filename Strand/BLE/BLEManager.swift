@@ -399,12 +399,21 @@ struct BackfillContinuation {
 struct HistoryCatchUpPolicy {
     static let defaultBehindGapSeconds = 300
     static let defaultMaxConsecutivePasses = 6
+    /// A no-cursor WHOOP 4 offload gets a smaller burst: its motion-row fallback is useful evidence,
+    /// but weaker than a moving trim cursor and must stop sooner.
+    static let sentinelMaxConsecutivePasses = 3
 
     /// Keep a current-night catch-up request alive once any completed offload has made cursor progress.
     /// A regular continuation may run between that productive exit and the motion check; its empty tail
     /// must not erase the original evidence that another bounded pass is safe to attempt.
-    static func nextPendingIntent(existingIntent: Bool, exitedSessionAdvancedTrim: Bool) -> Bool {
-        existingIntent || exitedSessionAdvancedTrim
+    static func nextPendingIntent(existingIntent: Bool, exitedSessionAdvancedTrim: Bool,
+                                  exitedSessionUsedNoCursor: Bool = false,
+                                  exitedSessionPersistedMotion: Bool = false) -> Bool {
+        if exitedSessionAdvancedTrim { return true }
+        // A no-cursor retry earns another request only when THIS session actually banked motion.
+        // An empty sentinel response stops immediately rather than carrying stale intent to the cap.
+        if exitedSessionUsedNoCursor { return exitedSessionPersistedMotion }
+        return existingIntent
     }
 
     /// Continue only when gravity is more than five minutes behind the newer live-HR or wall-clock
@@ -416,11 +425,15 @@ struct HistoryCatchUpPolicy {
                                hrFrontierTs: Int?,
                                wallNowUnix: Int,
                                trimAdvanced: Bool,
+                               sentinelMotionProgress: Bool = false,
                                consecutiveCount: Int,
                                behindGapSeconds: Int = defaultBehindGapSeconds,
                                maxConsecutivePasses: Int = defaultMaxConsecutivePasses) -> Bool {
-        guard connected, encryptedBond, trimAdvanced else { return false }
-        guard consecutiveCount < maxConsecutivePasses, let gravityFrontierTs else { return false }
+        guard connected, encryptedBond, trimAdvanced || sentinelMotionProgress else { return false }
+        let passCap = sentinelMotionProgress
+            ? min(maxConsecutivePasses, sentinelMaxConsecutivePasses)
+            : maxConsecutivePasses
+        guard consecutiveCount < passCap, let gravityFrontierTs else { return false }
         let referenceFrontier = max(hrFrontierTs ?? Int.min, wallNowUnix)
         return referenceFrontier - gravityFrontierTs > behindGapSeconds
     }
@@ -700,6 +713,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Current-connection count of retries specifically caused by gravity lagging the live-HR frontier.
     /// This uses HistoryCatchUpPolicy's separate six-pass cap and resets only on disconnect.
     private var consecutiveMotionCatchUps = 0
+    /// The pending request was earned by actual motion rows while the strap returned its no-cursor
+    /// sentinel. This selects the smaller three-pass safety cap for that burst.
+    private var motionCatchUpUsesSentinelProgress = false
     /// A productive offload has left motion materially behind. Retained across a regular continuation so
     /// its empty tail cannot discard the current-night catch-up opportunity before it is evaluated.
     private var motionCatchUpPending = false
@@ -1942,7 +1958,11 @@ public final class BLEManager: NSObject, ObservableObject {
         if reason == "timeout" || reason == "HISTORY_COMPLETE" {
             maybeAutoContinueBackfill(trimAdvanced: trimAdvanced,
                                       rowsPersisted: backfiller?.sessionRowsPersisted ?? 0)
-            scheduleMotionCatchUp(trimAdvanced: trimAdvanced)
+            let sentinelMotionProgress = currentTrim == UInt32.max
+                && (backfiller?.sessionMotionRows ?? 0) > 0
+            scheduleMotionCatchUp(trimAdvanced: trimAdvanced,
+                                   usedNoCursor: currentTrim == UInt32.max,
+                                   sentinelMotionProgress: sentinelMotionProgress)
         }
     }
 
@@ -1950,10 +1970,14 @@ public final class BLEManager: NSObject, ObservableObject {
     /// pass only when the pure policy says current-night gravity is still materially behind. The delay is
     /// intentional: timeout callbacks never synchronously issue another offload, and any existing stale-
     /// range continuation gets the first chance to start its independent pass.
-    private func scheduleMotionCatchUp(trimAdvanced: Bool) {
+    private func scheduleMotionCatchUp(trimAdvanced: Bool, usedNoCursor: Bool,
+                                       sentinelMotionProgress: Bool) {
         motionCatchUpPending = HistoryCatchUpPolicy.nextPendingIntent(
             existingIntent: motionCatchUpPending,
-            exitedSessionAdvancedTrim: trimAdvanced)
+            exitedSessionAdvancedTrim: trimAdvanced,
+            exitedSessionUsedNoCursor: usedNoCursor,
+            exitedSessionPersistedMotion: sentinelMotionProgress)
+        motionCatchUpUsesSentinelProgress = sentinelMotionProgress
         guard motionCatchUpPending else { return }
         motionCatchUpWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -1975,14 +1999,17 @@ public final class BLEManager: NSObject, ObservableObject {
                     hrFrontierTs: hrFrontier,
                     wallNowUnix: Int(Date().timeIntervalSince1970),
                     trimAdvanced: self.motionCatchUpPending,
+                    sentinelMotionProgress: self.motionCatchUpUsesSentinelProgress,
                     consecutiveCount: count)
                 guard shouldContinue else {
                     self.motionCatchUpPending = false
+                    self.motionCatchUpUsesSentinelProgress = false
                     return
                 }
                 // Another trigger could have begun an offload while the async frontier reads were running.
                 guard !self.backfilling else { return }
                 self.motionCatchUpPending = false
+                self.motionCatchUpUsesSentinelProgress = false
                 self.consecutiveMotionCatchUps += 1
                 self.log("Backfill: motion frontier remains behind live HR; scheduling bounded catch-up \\(self.consecutiveMotionCatchUps)/\\(HistoryCatchUpPolicy.defaultMaxConsecutivePasses).")
                 self.requestSync(.autoContinue)
@@ -3432,6 +3459,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         consecutiveAutoContinues = 0
         consecutiveMotionCatchUps = 0
         motionCatchUpPending = false
+        motionCatchUpUsesSentinelProgress = false
         lastSessionEndTrim = nil
         backfilling = false
         state.backfilling = false
