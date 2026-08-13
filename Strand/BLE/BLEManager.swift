@@ -410,9 +410,11 @@ struct HistoryCatchUpPolicy {
                                   exitedSessionUsedNoCursor: Bool = false,
                                   exitedSessionPersistedMotion: Bool = false) -> Bool {
         if exitedSessionAdvancedTrim { return true }
-        // A no-cursor retry earns another request only when THIS session actually banked motion.
-        // An empty sentinel response stops immediately rather than carrying stale intent to the cap.
-        if exitedSessionUsedNoCursor { return exitedSessionPersistedMotion }
+        // A no-cursor retry earns a NEW request only when THIS session actually banked motion. Its
+        // empty tail must still preserve an earlier request earned by a productive regular or sentinel
+        // pass; otherwise the regular continuation can erase that pending bounded catch-up before the
+        // deferred frontier check gets a turn.
+        if exitedSessionUsedNoCursor { return existingIntent || exitedSessionPersistedMotion }
         return existingIntent
     }
 
@@ -1977,7 +1979,16 @@ public final class BLEManager: NSObject, ObservableObject {
             exitedSessionAdvancedTrim: trimAdvanced,
             exitedSessionUsedNoCursor: usedNoCursor,
             exitedSessionPersistedMotion: sentinelMotionProgress)
-        motionCatchUpUsesSentinelProgress = sentinelMotionProgress
+        // Preserve the evidence type while its deferred request crosses an empty continuation tail, so
+        // the weaker no-cursor path keeps its tighter three-pass cap. A later moving-trim session earns
+        // the normal cap; a fresh productive sentinel session earns the sentinel cap.
+        if trimAdvanced {
+            motionCatchUpUsesSentinelProgress = false
+        } else if sentinelMotionProgress {
+            motionCatchUpUsesSentinelProgress = true
+        } else if !motionCatchUpPending {
+            motionCatchUpUsesSentinelProgress = false
+        }
         guard motionCatchUpPending else { return }
         motionCatchUpWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in

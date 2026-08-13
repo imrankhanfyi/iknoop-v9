@@ -49,6 +49,17 @@ final class HistoryCatchUpPolicyTests: XCTestCase {
             existingIntent: false, exitedSessionAdvancedTrim: false))
     }
 
+    /// An empty no-cursor tail can follow a productive sentinel offload before the deferred motion
+    /// check runs. It must not revoke the earlier catch-up request; otherwise current-night motion
+    /// stays behind even though the bounded sentinel path was earned.
+    func testKeepsPendingMotionCatchUpAcrossEmptySentinelTail() {
+        XCTAssertTrue(HistoryCatchUpPolicy.nextPendingIntent(
+            existingIntent: true,
+            exitedSessionAdvancedTrim: false,
+            exitedSessionUsedNoCursor: true,
+            exitedSessionPersistedMotion: false))
+    }
+
     /// A gravity gap at or below five minutes is caught up; a frozen trim must also halt a larger gap.
     func testStopsWhenMotionCaughtUpOrTrimFrozen() {
         XCTAssertFalse(HistoryCatchUpPolicy.shouldContinue(
