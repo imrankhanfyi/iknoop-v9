@@ -89,6 +89,27 @@ final class MigrationTests: XCTestCase {
         XCTAssertEqual(n.rr, 3)
     }
 
+    /// Same-second beats must retain the order the strap emitted them. Value-sorting these rows
+    /// changes adjacent differences and systematically biases RMSSD downward.
+    func testRrIntervalsReadSameSecondBeatsInEmissionOrder() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "dev1", mac: nil, name: nil)
+        let emission = [812, 795, 840, 801, 833]
+        _ = try await store.insert(
+            Streams(rr: emission.map { RRInterval(ts: 100, rrMs: $0) }), deviceId: "dev1")
+
+        let read = try await store.rrIntervals(deviceId: "dev1", from: 0, to: 1_000, limit: 100)
+        XCTAssertEqual(read.map(\.rrMs), emission)
+    }
+
+    func testV29AddsNullableOrdWithoutChangingTheRrKey() async throws {
+        let store = try await WhoopStore.inMemory()
+        let columns = try await store.columnNamesForTest(table: "rrInterval")
+        XCTAssertTrue(columns.contains("ord"))
+        let primaryKey = try await store.primaryKeyColumns("rrInterval")
+        XCTAssertEqual(primaryKey, ["deviceId", "ts", "rrMs", "seq"])
+    }
+
     /// v5 adds a `synced` column to all 8 decoded tables.
     func testV5AddsSyncedColumnToDecodedTables() async throws {
         let store = try await WhoopStore.inMemory()

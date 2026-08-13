@@ -574,6 +574,16 @@ extension WhoopStore {
                 try db.execute(sql: "ALTER TABLE \(table)_v28 RENAME TO \(table)")
             }
         }
+
+        // v29: preserves each R-R beat's observed emission order within its second. `seq` only
+        // distinguishes equal (ts, rrMs) values and cannot express the order of distinct beats.
+        // This is additive and nullable: existing rows truthfully remain unknown rather than being
+        // assigned an invented order. The primary key stays (deviceId, ts, rrMs, seq).
+        migrator.registerMigration("v29-rr-ord") { db in
+            try db.alter(table: "rrInterval") { t in
+                t.add(column: "ord", .integer)
+            }
+        }
         return migrator
     }
 }
