@@ -698,9 +698,13 @@ struct SleepView: View {
         // WHOOP top-chart data (ryanAtriumAi #988): 1-min sleeping-HR buckets for THIS night, reloaded
         // only when the displayed night changes (same `.task(id:)` pattern the other per-night loads use).
         .task(id: "\(repo.deviceId):\(night.session.effectiveStartTs):\(night.session.endTs)") {
-            nightHR = await repo.hrBuckets(from: night.session.startTs,
-                                           to: night.session.endTs,
-                                           bucketSeconds: 60)
+            let loadedHR = await repo.hrBuckets(from: night.session.startTs,
+                                                to: night.session.endTs,
+                                                bucketSeconds: 60)
+            // The repository await does not necessarily cooperate with cancellation. A task for an
+            // old night must not install its HR or start an annotation load after `.task(id:)` moves on.
+            guard !Task.isCancelled else { return }
+            nightHR = loadedHR
             await annotationEditor.load(
                 deviceId: repo.deviceId,
                 fromTsMs: Int64(night.session.effectiveStartTs) * 1_000,
@@ -1096,6 +1100,7 @@ struct SleepView: View {
                 annotations: annotationEditor.annotations,
                 bounds: domain.bounds,
                 selection: $annotationEditor.selected,
+                errorMessage: annotationEditor.persistenceErrorMessage,
                 add: { type, tsMs in
                     Task { await annotationEditor.add(deviceId: repo.deviceId, type: type, tsMs: tsMs) }
                 },
@@ -2778,6 +2783,7 @@ struct SleepAnnotationOverlay<Content: View>: View {
     let annotations: [SleepAnnotationRow]
     let bounds: ClosedRange<Int64>
     @Binding var selection: SleepAnnotationRow?
+    let errorMessage: String?
     let add: (SleepAnnotationType, Int64) -> Void
     let move: (SleepAnnotationRow, Int64) -> Void
     let replace: (SleepAnnotationRow, SleepAnnotationType) -> Void
@@ -2849,6 +2855,14 @@ struct SleepAnnotationOverlay<Content: View>: View {
                         .fill(StrandPalette.surfaceInset)
                 )
                 .accessibilityElement(children: .contain)
+            }
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.statusCritical)
+                    .padding(.horizontal, NoopMetrics.space3)
+                    .accessibilityLabel(errorMessage)
             }
 
             ZStack(alignment: .topLeading) {

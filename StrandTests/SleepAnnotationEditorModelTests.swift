@@ -25,6 +25,15 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
         XCTAssertEqual(SleepAnnotationEditorModel.clampedX(105, width: 100), 100)
     }
 
+    func testDragTimestampClampsToGridPointsInsideArbitrarySecondBounds() {
+        XCTAssertEqual(SleepAnnotationEditorModel.snappedTimestamp(
+            x: -5, width: 100, startTsMs: 12_345, endTsMs: 112_345), 30_000)
+        XCTAssertEqual(SleepAnnotationEditorModel.snappedTimestamp(
+            x: 50, width: 100, startTsMs: 12_345, endTsMs: 112_345), 60_000)
+        XCTAssertEqual(SleepAnnotationEditorModel.snappedTimestamp(
+            x: 105, width: 100, startTsMs: 12_345, endTsMs: 112_345), 90_000)
+    }
+
     func testEqualTimestampLabelsStackByType() {
         let rows = [
             SleepAnnotationRow(deviceId: "a", tsMs: 60_000, type: .inBed),
@@ -94,6 +103,31 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
         await oldLoad.value
 
         XCTAssertEqual(model.annotations, [newRow])
+    }
+
+    func testCancelledCallerCannotClearCurrentWindowAfterCancellationInsensitiveAwait() async {
+        let staleRow = SleepAnnotationRow(deviceId: "old", tsMs: 60_000, type: .inBed)
+        let currentRow = SleepAnnotationRow(deviceId: "new", tsMs: 180_000, type: .arose)
+        let gate = AnnotationLoadGate()
+        let oldCallerStarted = expectation(description: "old caller reached cancellation-insensitive await")
+        let model = SleepAnnotationEditorModel()
+
+        let oldCaller = Task { @MainActor in
+            oldCallerStarted.fulfill()
+            let staleRows = await gate.wait()
+            await model.load(deviceId: "old", fromTsMs: 0, toTsMs: 120_000) { _, _, _ in
+                staleRows
+            }
+        }
+        await fulfillment(of: [oldCallerStarted], timeout: 1)
+        oldCaller.cancel()
+        await model.load(deviceId: "new", fromTsMs: 120_000, toTsMs: 240_000) { _, _, _ in
+            [currentRow]
+        }
+        await gate.resume(returning: [staleRow])
+        await oldCaller.value
+
+        XCTAssertEqual(model.annotations, [currentRow])
     }
 
     func testOverlappingMutationsSerializeSoEarlierFailureCannotEraseLaterSuccess() async {
@@ -176,6 +210,21 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
 
         XCTAssertEqual(model.annotations, prior)
         XCTAssertEqual(model.selected, prior[0])
+        XCTAssertEqual(model.persistenceErrorMessage, "Couldn’t save sleep marker. Try again.")
+    }
+
+    func testSuccessfulMutationClearsPriorPersistenceError() async {
+        let prior = SleepAnnotationRow(deviceId: "a", tsMs: 60_000, type: .inBed)
+        let model = await loadedModel([prior], selected: prior)
+
+        await model.add(deviceId: "a", type: .fellAsleep, tsMs: 90_000) { _ in
+            throw MutationError.rejected
+        }
+        XCTAssertNotNil(model.persistenceErrorMessage)
+
+        await model.add(deviceId: "a", type: .arose, tsMs: 120_000) { _ in }
+
+        XCTAssertNil(model.persistenceErrorMessage)
     }
 
     func testFailedMoveRestoresExactPriorAnnotationsAndSelection() async {

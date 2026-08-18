@@ -43,7 +43,7 @@ struct SleepAnnotationNaturalKey: Hashable {
     let typeRawValue: Int
 }
 
-/// Owns the sleep-timeline annotation draft and keeps storage failures invisible to the graph.
+/// Owns the sleep-timeline annotation draft and exposes a generic transient save failure to the graph.
 ///
 /// Mutations are optimistic so a marker follows the pointer immediately. Every operation snapshots the
 /// complete prior array and selection, then restores both verbatim if the on-device write throws.
@@ -57,6 +57,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
 
     @Published private(set) var annotations: [SleepAnnotationRow]
     @Published var selected: SleepAnnotationRow?
+    @Published private(set) var persistenceErrorMessage: String?
 
     private var store: WhoopStore?
     private var activeWindow: Window?
@@ -70,6 +71,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
 
     init(annotations: [SleepAnnotationRow] = []) {
         self.annotations = annotations
+        persistenceErrorMessage = nil
     }
 
     static func clampedX(_ x: CGFloat, width: CGFloat) -> CGFloat {
@@ -80,9 +82,18 @@ final class SleepAnnotationEditorModel: ObservableObject {
     /// Maps a graph coordinate into its inclusive sleep window and rounds to the nearest 30 seconds.
     static func snappedTimestamp(x: CGFloat, width: CGFloat, startTsMs: Int64, endTsMs: Int64) -> Int64 {
         guard width > 0, endTsMs > startTsMs else { return startTsMs }
+        let gridMs: Int64 = 30_000
+        let lowerRemainder = startTsMs % gridMs
+        let firstGridTsMs = lowerRemainder == 0
+            ? startTsMs
+            : startTsMs + (gridMs - lowerRemainder)
+        let lastGridTsMs = endTsMs - (endTsMs % gridMs)
+        // Real sleep windows span many grid points. Retain an in-window value for a degenerate
+        // sub-grid window, where no timestamp can satisfy both constraints.
+        guard firstGridTsMs <= lastGridTsMs else { return startTsMs }
         let fraction = Double(clampedX(x, width: width) / width)
         let raw = startTsMs + Int64((Double(endTsMs - startTsMs) * fraction).rounded())
-        return min(endTsMs, max(startTsMs, WhoopStore.snappedTsMs(raw)))
+        return min(lastGridTsMs, max(firstGridTsMs, WhoopStore.snappedTsMs(raw)))
     }
 
     /// Equal-time labels use their canonical type order, matching the store's deterministic ordering.
@@ -100,6 +111,9 @@ final class SleepAnnotationEditorModel: ObservableObject {
 
     func load(deviceId: String, fromTsMs: Int64, toTsMs: Int64,
               fetch: LoadMutation? = nil) async {
+        // A SwiftUI per-night task may reach here after a cancellation-insensitive repository await.
+        // It must not clear or replace the newer night's already-installed editor context.
+        guard !Task.isCancelled else { return }
         let window = Window(
             deviceId: deviceId,
             bounds: min(fromTsMs, toTsMs)...max(fromTsMs, toTsMs)
@@ -109,6 +123,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
         activeWindow = window
         annotations = []
         selected = nil
+        persistenceErrorMessage = nil
 
         do {
             let loaded: [SleepAnnotationRow]
@@ -147,6 +162,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
     private func performAdd(deviceId: String, type: SleepAnnotationType, tsMs: Int64,
                             mutation: InsertMutation?, requestedRevision: Int) async {
         guard accepts(deviceId: deviceId, tsMs: tsMs) else { return }
+        persistenceErrorMessage = nil
         let row = SleepAnnotationRow(deviceId: deviceId, tsMs: tsMs, type: type)
         let snapshot = snapshot()
         annotations = normalized(annotations + [row])
@@ -158,7 +174,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).insertSleepAnnotation(row)
             }
         } catch {
-            if contextRevision == requestedRevision { restore(snapshot) }
+            if contextRevision == requestedRevision { restoreAfterPersistenceFailure(snapshot) }
         }
     }
 
@@ -175,6 +191,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
                              requestedRevision: Int) async {
         guard acceptsExisting(row), accepts(deviceId: row.deviceId, tsMs: toTsMs) else { return }
         guard row.tsMs != toTsMs else { return }
+        persistenceErrorMessage = nil
         let replacement = SleepAnnotationRow(deviceId: row.deviceId, tsMs: toTsMs, type: row.type)
         let snapshot = snapshot()
         annotations = normalized(annotations.filter { $0 != row } + [replacement])
@@ -186,7 +203,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).moveSleepAnnotation(row, toTsMs: toTsMs)
             }
         } catch {
-            if contextRevision == requestedRevision { restore(snapshot) }
+            if contextRevision == requestedRevision { restoreAfterPersistenceFailure(snapshot) }
         }
     }
 
@@ -204,6 +221,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
                                 mutation: ReplaceMutation?, requestedRevision: Int) async {
         guard acceptsExisting(row) else { return }
         guard row.type != type else { return }
+        persistenceErrorMessage = nil
         let replacement = SleepAnnotationRow(deviceId: row.deviceId, tsMs: row.tsMs, type: type)
         let snapshot = snapshot()
         annotations = normalized(annotations.filter { $0 != row } + [replacement])
@@ -215,7 +233,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).replaceSleepAnnotation(row, with: type)
             }
         } catch {
-            if contextRevision == requestedRevision { restore(snapshot) }
+            if contextRevision == requestedRevision { restoreAfterPersistenceFailure(snapshot) }
         }
     }
 
@@ -230,6 +248,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
     private func performDelete(_ row: SleepAnnotationRow, mutation: DeleteMutation?,
                                requestedRevision: Int) async {
         guard acceptsExisting(row) else { return }
+        persistenceErrorMessage = nil
         let snapshot = snapshot()
         annotations.removeAll { $0 == row }
         if selected == row { selected = nil }
@@ -240,7 +259,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).deleteSleepAnnotation(row)
             }
         } catch {
-            if contextRevision == requestedRevision { restore(snapshot) }
+            if contextRevision == requestedRevision { restoreAfterPersistenceFailure(snapshot) }
         }
     }
 
@@ -290,6 +309,13 @@ final class SleepAnnotationEditorModel: ObservableObject {
     private func restore(_ snapshot: (annotations: [SleepAnnotationRow], selected: SleepAnnotationRow?)) {
         annotations = snapshot.annotations
         selected = snapshot.selected
+    }
+
+    private func restoreAfterPersistenceFailure(
+        _ snapshot: (annotations: [SleepAnnotationRow], selected: SleepAnnotationRow?)
+    ) {
+        restore(snapshot)
+        persistenceErrorMessage = String(localized: "Couldn’t save sleep marker. Try again.")
     }
 }
 
