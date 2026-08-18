@@ -26,9 +26,33 @@ import androidx.room.Index
  *   - journal         PK (deviceId, day, question)
  *   - workout         PK (deviceId, startTs, sport)
  *   - appleDaily      PK (deviceId, day)
+ *   - sleepAnnotation PK (deviceId, tsMs, type)
  *
  * `ts` columns are wall-clock unix SECONDS (Swift uses Int -> Kotlin Long for safety).
+ * `sleepAnnotation.tsMs` is the explicit exception: user-selected graph instants use epoch milliseconds.
  */
+
+/** Raw type codes for user-authored sleep graph annotations. Mirrors Swift SleepAnnotationType exactly. */
+object SleepAnnotation {
+    object Type {
+        const val IN_BED = 0
+        const val FELL_ASLEEP = 1
+        const val AWAKE_IN_BED = 2
+        const val BRIEFLY_GOT_UP = 3
+        const val AROSE = 4
+    }
+
+    /** Round an epoch-millisecond instant to the nearest 30-second boundary; ties round up. */
+    fun snapTsMs(tsMs: Long): Long = (tsMs + 15_000L) / 30_000L * 30_000L
+}
+
+/** One user-authored annotation. The composite key permits different types at the same instant. */
+@Entity(tableName = "sleepAnnotation", primaryKeys = ["deviceId", "tsMs", "type"])
+data class SleepAnnotationRow(
+    val deviceId: String,
+    val tsMs: Long,
+    val type: Int,
+)
 
 /** Device row. Swift `device` table (Database.swift v1). Natural key = id. */
 @Entity(tableName = "device")

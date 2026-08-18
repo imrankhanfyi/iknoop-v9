@@ -90,6 +90,7 @@ interface DeviceRegistryDao {
     @Query("DELETE FROM liveSession WHERE deviceId = :deviceId") suspend fun deleteLiveSessionsFor(deviceId: String)
     @Query("DELETE FROM dismissedWorkout WHERE deviceId = :deviceId") suspend fun deleteDismissedWorkoutsFor(deviceId: String)
     @Query("DELETE FROM dismissedSleep WHERE deviceId = :deviceId") suspend fun deleteDismissedSleepsFor(deviceId: String)
+    @Query("DELETE FROM sleepAnnotation WHERE deviceId = :deviceId") suspend fun deleteSleepAnnotationsFor(deviceId: String)
 
     /** Set the owner override for a day (insert-or-replace by the day PK). */
     @Insert(onConflict = OnConflictStrategy.REPLACE)

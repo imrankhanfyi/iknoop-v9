@@ -205,6 +205,21 @@ class WhoopRepository(private val dao: WhoopDao) {
 
     constructor(db: WhoopDatabase) : this(db.whoopDao())
 
+    // MARK: - Sleep graph annotations (epoch milliseconds, unlike strap stream timestamps)
+
+    suspend fun sleepAnnotations(deviceId: String, fromTsMs: Long, toTsMs: Long): List<SleepAnnotationRow> =
+        dao.sleepAnnotations(deviceId, fromTsMs, toTsMs)
+
+    suspend fun insertSleepAnnotation(row: SleepAnnotationRow): Long = dao.insertSleepAnnotation(row)
+
+    suspend fun moveSleepAnnotation(row: SleepAnnotationRow, toTsMs: Long) =
+        dao.moveSleepAnnotation(row, toTsMs)
+
+    suspend fun replaceSleepAnnotation(row: SleepAnnotationRow, type: Int) =
+        dao.replaceSleepAnnotation(row, type)
+
+    suspend fun deleteSleepAnnotation(row: SleepAnnotationRow) = dao.deleteSleepAnnotation(row)
+
     // MARK: - Device
 
     suspend fun upsertDevice(id: String, mac: String? = null, name: String? = null) {

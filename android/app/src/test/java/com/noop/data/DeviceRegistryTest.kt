@@ -102,6 +102,7 @@ class DeviceRegistryTest {
         override suspend fun deleteLiveSessionsFor(deviceId: String) { deletedTables += "liveSession" to deviceId }
         override suspend fun deleteDismissedWorkoutsFor(deviceId: String) { deletedTables += "dismissedWorkout" to deviceId }
         override suspend fun deleteDismissedSleepsFor(deviceId: String) { deletedTables += "dismissedSleep" to deviceId }
+        override suspend fun deleteSleepAnnotationsFor(deviceId: String) { deletedTables += "sleepAnnotation" to deviceId }
     }
 
     /** Registry over the fake DAO with a pass-through transactor (Room's withTransaction stand-in). */
@@ -236,7 +237,7 @@ class DeviceRegistryTest {
             "hrSample", "rrInterval", "spo2Sample", "skinTempSample", "respSample", "gravitySample",
             "stepSample", "ppgHrSample", "ppgWaveformSample", "event", "battery", "dailyMetric", "sleepSession",
             "journal", "workout", "appleDaily", "metricSeries", "dayOwnership",
-            "sleepStateSample", "labMarker", "liveSession", "dismissedWorkout", "dismissedSleep",
+            "sleepStateSample", "labMarker", "liveSession", "dismissedWorkout", "dismissedSleep", "sleepAnnotation",
         )
         assertEquals(expectedTables, dao.deletedTables.map { it.first }.toSet())
         // Every delete was scoped to the requested device, not the seeded my-whoop.

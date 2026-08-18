@@ -8,6 +8,37 @@ import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
+/** Room access for user-authored sleep graph annotations. Millisecond bounds are inclusive. */
+interface SleepAnnotationDao {
+    @Query(
+        "SELECT * FROM sleepAnnotation WHERE deviceId = :deviceId AND tsMs >= :fromTsMs AND tsMs <= :toTsMs " +
+            "ORDER BY tsMs ASC, type ASC",
+    )
+    suspend fun sleepAnnotations(deviceId: String, fromTsMs: Long, toTsMs: Long): List<SleepAnnotationRow>
+
+    /** INSERT OR IGNORE by the (deviceId, tsMs, type) natural key. */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertSleepAnnotation(row: SleepAnnotationRow): Long
+
+    /** Delete by the full natural key. */
+    @androidx.room.Delete
+    suspend fun deleteSleepAnnotation(row: SleepAnnotationRow)
+
+    /** Move one annotation atomically. An already-present target remains exactly once. */
+    @Transaction
+    suspend fun moveSleepAnnotation(row: SleepAnnotationRow, toTsMs: Long) {
+        deleteSleepAnnotation(row)
+        insertSleepAnnotation(row.copy(tsMs = toTsMs))
+    }
+
+    /** Replace one annotation's type atomically. An already-present target remains exactly once. */
+    @Transaction
+    suspend fun replaceSleepAnnotation(row: SleepAnnotationRow, type: Int) {
+        deleteSleepAnnotation(row)
+        insertSleepAnnotation(row.copy(type = type))
+    }
+}
+
 /**
  * Data-access for the local store. Mirrors the GRDB reads/writes in WhoopStore
  * (StreamStore.swift, Reads.swift, MetricsCache.swift).
@@ -23,7 +54,7 @@ import kotlinx.coroutines.flow.Flow
  * and bound by [from, to] inclusive with a row limit.
  */
 @Dao
-interface WhoopDao : DeviceRegistryDao {
+interface WhoopDao : DeviceRegistryDao, SleepAnnotationDao {
 
     // MARK: - Device
 
