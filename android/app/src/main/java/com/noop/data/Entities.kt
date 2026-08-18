@@ -322,6 +322,8 @@ data class SleepSession(
     // unchanged and old rows read userEdited=false / startTsAdjusted=null.
     val userEdited: Boolean = false,
     val startTsAdjusted: Long? = null,
+    /** Original detector wake. A user-corrected [endTs] never changes this chart/data boundary. */
+    val detectedEndTs: Long? = null,
     // v18 (Swift WhoopStore v18 parity, MIGRATION_11_12). Per-epoch analytics the stager/interpreter
     // compute then discard, banked beside [stagesJSON] on the same row:
     //   - [motionJSON]: a compact JSON array of per-epoch motion magnitudes (the SleepStager's per-epoch
@@ -337,6 +339,7 @@ data class SleepSession(
     /** The bed (onset) time to DISPLAY / sort / re-stage by: the user's hand-set onset when edited,
      *  else the immutable detected [startTs]. Mirrors Swift `CachedSleepSession.effectiveStartTs`. */
     val effectiveStartTs: Long get() = startTsAdjusted ?: startTs
+    val observedEndTs: Long get() = detectedEndTs ?: endTs
 
     /** Whole-block duration in hours (effective onset → wake). */
     val durationHours: Double get() = (endTs - effectiveStartTs) / 3600.0

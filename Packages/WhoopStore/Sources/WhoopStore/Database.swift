@@ -592,6 +592,17 @@ extension WhoopStore {
                 t.primaryKey(["deviceId", "tsMs", "type"])
             }
         }
+        // v31: retain the detector's original wake independently from a user's corrected wake. Before
+        // this column, `applySleepEdit` overwrote `endTs`, and a subsequent chart had no immutable
+        // observed extent to query or draw. Backfill is exact for every pre-v31 row at upgrade time:
+        // `endTs` was the only known detected end before manual editing existed. Future edits leave this
+        // value untouched; unedited detector upserts keep it current. Android Room v23 is the twin.
+        migrator.registerMigration("v31-sleep-detected-end") { db in
+            try db.alter(table: "sleepSession") { t in
+                t.add(column: "detectedEndTs", .integer)
+            }
+            try db.execute(sql: "UPDATE sleepSession SET detectedEndTs = endTs WHERE detectedEndTs IS NULL")
+        }
         return migrator
     }
 }

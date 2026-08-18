@@ -515,7 +515,8 @@ fun SleepScreen(
                         sleeps = sleeps.map {
                             if (it.deviceId == s.deviceId && it.startTs == s.startTs) {
                                 val reclipped = SleepWindowReclip.reclip(it.stagesJSON, it.effectiveStartTs, it.endTs, safeStart, safeEnd)
-                                it.copy(startTsAdjusted = safeStart, endTs = safeEnd, userEdited = true,
+                                it.copy(startTsAdjusted = safeStart, endTs = safeEnd,
+                                        detectedEndTs = it.detectedEndTs ?: it.endTs, userEdited = true,
                                         stagesJSON = reclipped ?: it.stagesJSON)
                             } else {
                                 it

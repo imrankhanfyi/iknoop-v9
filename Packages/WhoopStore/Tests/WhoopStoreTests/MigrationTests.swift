@@ -4,6 +4,24 @@ import WhoopProtocol
 @testable import WhoopStore
 
 final class MigrationTests: XCTestCase {
+    func testV31BackfillsDetectedEndWithoutChangingEditableEnd() throws {
+        let dbQueue = try DatabaseQueue()
+        try WhoopStore.makeMigrator().migrate(dbQueue, upTo: "v30-sleep-annotations")
+        try dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO sleepSession (deviceId, startTs, endTs, userEdited)
+                VALUES ('d', 1_000, 5_000, 1)
+                """)
+        }
+
+        try WhoopStore.makeMigrator().migrate(dbQueue)
+
+        try dbQueue.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT endTs FROM sleepSession WHERE deviceId = 'd'"), 5_000)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT detectedEndTs FROM sleepSession WHERE deviceId = 'd'"), 5_000)
+        }
+    }
+
     func testV30CreatesSleepAnnotationWithExpectedCompositePrimaryKey() throws {
         let dbQueue = try DatabaseQueue()
         try WhoopStore.makeMigrator().migrate(dbQueue)

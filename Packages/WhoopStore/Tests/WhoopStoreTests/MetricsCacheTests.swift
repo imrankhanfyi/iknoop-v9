@@ -3,6 +3,21 @@ import GRDB
 @testable import WhoopStore
 
 final class MetricsCacheTests: XCTestCase {
+    func testSleepEditPreservesDetectedEndForTheObservedDataRange() async throws {
+        let store = try await WhoopStore.inMemory()
+        let session = CachedSleepSession(startTs: 1_000, endTs: 5_000, efficiency: 0.9,
+                                         restingHr: 52, avgHrv: 61, stagesJSON: nil)
+        _ = try await store.upsertSleepSessions([session], deviceId: "devA")
+
+        _ = try await store.applySleepEdit(deviceId: "devA", detectedStartTs: 1_000,
+                                           newStartTs: 900, newEndTs: 5_400)
+
+        let rows = try await store.sleepSessions(deviceId: "devA", from: 0, to: 9_999, limit: 1)
+        let saved = try XCTUnwrap(rows.first)
+        XCTAssertEqual(saved.endTs, 5_400)
+        XCTAssertEqual(saved.detectedEndTs, 5_000)
+    }
+
 
     func testV4CreatesDerivedTables() async throws {
         let store = try await WhoopStore.inMemory()

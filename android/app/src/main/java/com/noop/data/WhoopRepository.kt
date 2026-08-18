@@ -351,6 +351,7 @@ class WhoopRepository(private val dao: WhoopDao) {
             listOf(session.copy(
                 startTsAdjusted = safeStartTs,
                 endTs = safeEndTs,
+                detectedEndTs = session.detectedEndTs ?: session.endTs,
                 userEdited = true,
                 stagesJSON = reclipped ?: session.stagesJSON,
             )),

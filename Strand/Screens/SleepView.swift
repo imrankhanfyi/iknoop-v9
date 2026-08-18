@@ -127,6 +127,8 @@ struct SleepView: View {
     /// The pending auto-dismiss task for `sleepUndo`, cancelled when a new delete replaces the banner or
     /// the user hits Undo, so a stale timer can't clear a fresh banner.
     @State private var sleepUndoTask: Task<Void, Never>?
+    @State private var boundaryUndo: SleepBoundaryUndo?
+    @State private var boundaryUndoTask: Task<Void, Never>?
 
     var body: some View {
         // Resolve the memoized model for THIS render. `dataKey` is O(1)-ish (counts + last-row
@@ -150,6 +152,7 @@ struct SleepView: View {
                     // Each top-level section fades + rises in sequence on first appear (Reduce-Motion safe).
                     VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                         if let sleepUndo { sleepUndoBanner(sleepUndo) }
+                        if let boundaryUndo { boundaryUndoBanner(boundaryUndo) }
                         restHero(resolved).staggeredAppear(index: 0)
                         SleepMarkCard().staggeredAppear(index: 1)
                         hero(resolved).staggeredAppear(index: 2)
@@ -344,6 +347,57 @@ struct SleepView: View {
         .transition(.opacity)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(message)
+    }
+
+    private func presentBoundaryUndo(_ undo: SleepBoundaryUndo) {
+        boundaryUndoTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) { boundaryUndo = undo }
+        let identity = undo.detectedStartTs
+        boundaryUndoTask = Task {
+            try? await Task.sleep(nanoseconds: 7_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard boundaryUndo?.detectedStartTs == identity else { return }
+                withAnimation(.easeOut(duration: 0.2)) { boundaryUndo = nil }
+            }
+        }
+    }
+
+    private func undoBoundaryEdit(_ undo: SleepBoundaryUndo) async {
+        boundaryUndoTask?.cancel()
+        await repo.editSleepTimes(
+            detectedStartTs: undo.detectedStartTs,
+            oldEndTs: undo.priorEndTs,
+            storedStagesJSON: undo.priorStagesJSON,
+            newStartTs: undo.priorStartTs,
+            newEndTs: undo.priorEndTs
+        )
+        await intelligence.analyzeRecent()
+        await repo.refresh()
+        await MainActor.run { withAnimation(.easeOut(duration: 0.2)) { boundaryUndo = nil } }
+    }
+
+    @ViewBuilder
+    private func boundaryUndoBanner(_ undo: SleepBoundaryUndo) -> some View {
+        HStack(spacing: NoopMetrics.space2) {
+            Image(systemName: "arrow.uturn.backward")
+                .foregroundStyle(StrandPalette.restColor)
+                .accessibilityHidden(true)
+            Text("Sleep marker updated to \(clockTime(undo.priorStartTs))–\(clockTime(undo.priorEndTs)).")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+            Spacer(minLength: NoopMetrics.space2)
+            Button("Undo") { Task { await undoBoundaryEdit(undo) } }
+                .buttonStyle(LiquidPressStyle())
+                .foregroundStyle(StrandPalette.restColor)
+                .accessibilityLabel("Undo sleep marker update")
+        }
+        .padding(NoopMetrics.space3)
+        .background(StrandPalette.restColor.opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
+            .strokeBorder(StrandPalette.restColor.opacity(0.22), lineWidth: 1))
+        .transition(.opacity)
     }
 
     /// The fill fraction (0…1) the Rest hero gauge animates to — the night's sleep-performance
@@ -701,17 +755,19 @@ struct SleepView: View {
         }
         // WHOOP top-chart data (ryanAtriumAi #988): 1-min sleeping-HR buckets for THIS night, reloaded
         // only when the displayed night changes (same `.task(id:)` pattern the other per-night loads use).
-        .task(id: "\(repo.deviceId):\(night.session.effectiveStartTs):\(night.session.endTs)") {
+        .task(id: "\(repo.deviceId):\(night.session.startTs):\(night.session.detectedEndTs ?? night.session.endTs):\(night.session.effectiveStartTs):\(night.session.endTs)") {
             let loadedHR = await repo.hrBuckets(from: night.session.startTs,
-                                                to: night.session.endTs,
+                                                to: night.session.detectedEndTs ?? night.session.endTs,
                                                 bucketSeconds: 60)
             // The repository await does not necessarily cooperate with cancellation. A task for an
             // old night must not install its HR or start an annotation load after `.task(id:)` moves on.
             guard !Task.isCancelled else { return }
             nightHR = loadedHR
             let editDomain = SleepTimelineEditDomain(
-                sessionStartTs: night.session.effectiveStartTs,
-                sessionEndTs: night.session.endTs
+                detectedStartTs: night.session.startTs,
+                detectedEndTs: night.session.detectedEndTs ?? night.session.endTs,
+                adjustedStartTs: night.session.effectiveStartTs,
+                adjustedEndTs: night.session.endTs
             )
             await annotationEditor.load(
                 deviceId: repo.deviceId,
@@ -1087,8 +1143,10 @@ struct SleepView: View {
     private func stageTimeline(_ s: Stages, intervals: [SleepInterval], night: Night) -> some View {
         let timelineKey = night.editTarget?.startTs ?? night.session.startTs
         let proposedEditDomain = SleepTimelineEditDomain(
-            sessionStartTs: night.session.effectiveStartTs,
-            sessionEndTs: night.session.endTs
+            detectedStartTs: night.session.startTs,
+            detectedEndTs: night.session.detectedEndTs ?? night.session.endTs,
+            adjustedStartTs: night.session.effectiveStartTs,
+            adjustedEndTs: night.session.endTs
         )
         let editDomain = sleepTimelineDomains.cachedDomain(for: timelineKey) ?? proposedEditDomain
         let domain = SleepAnnotationTimelineDomain(
@@ -1101,13 +1159,22 @@ struct SleepView: View {
         let smoothed = timeline.intervals
         let origin = timeline.originSeconds
         let span = timeline.spanSeconds
+        let heartRateDomain = SleepObservedTimelineDomain(
+            sessionStartTs: night.session.startTs,
+            sessionEndTs: night.session.detectedEndTs ?? night.session.endTs
+        )
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             // WHOOP's hero pair: HOURS OF SLEEP + RESTORATIVE SLEEP (deep + REM), each against
             // its 30-day typical.
             sleepHeadline(s)
             // WHOOP's sleeping heart-rate chart above the rows: thin HR trace across the night.
             // Selecting a stage tints the trace + washes the chart columns during that stage.
-            sleepHRChart(intervals: smoothed, origin: origin, span: span, night: night)
+            sleepHRChart(
+                intervals: smoothed,
+                origin: heartRateDomain.originSeconds,
+                span: heartRateDomain.spanSeconds,
+                night: night
+            )
                 .frame(height: 124)
                 .padding(.horizontal, 10)
                 .padding(.bottom, 2)
@@ -1141,14 +1208,24 @@ struct SleepView: View {
                             startTs: night.session.effectiveStartTs,
                             endTs: night.session.endTs,
                             domain: editDomain
-                        ) { newStartTs, newEndTs in
+                        ) { boundary, correctedTs in
+                            let correctedWindow = SleepBoundaryCommit.window(
+                                changing: boundary, to: correctedTs,
+                                startTs: night.session.effectiveStartTs, endTs: night.session.endTs
+                            )
+                            presentBoundaryUndo(SleepBoundaryUndo(
+                                detectedStartTs: target.startTs,
+                                priorStartTs: night.session.effectiveStartTs,
+                                priorEndTs: night.session.endTs,
+                                priorStagesJSON: target.stagesJSON
+                            ))
                             Task {
                                 await repo.editSleepTimes(
                                     detectedStartTs: target.startTs,
                                     oldEndTs: target.endTs,
                                     storedStagesJSON: target.stagesJSON,
-                                    newStartTs: newStartTs,
-                                    newEndTs: newEndTs
+                                    newStartTs: correctedWindow.startTs,
+                                    newEndTs: correctedWindow.endTs
                                 )
                                 await intelligence.analyzeRecent()
                                 await repo.refresh()
@@ -1160,22 +1237,11 @@ struct SleepView: View {
             .task(id: timelineKey) {
                 _ = sleepTimelineDomains.domain(
                     for: timelineKey,
-                    sessionStartTs: night.session.effectiveStartTs,
-                    sessionEndTs: night.session.endTs
+                    sessionStartTs: night.session.startTs,
+                    sessionEndTs: night.session.detectedEndTs ?? night.session.endTs
                 )
             }
-            // onset · midpoint · wake clock labels, aligned with the rows' inner strips.
-            HStack {
-                Text(Self.stageAxisFormatter.string(from: domain.startDate))
-                Spacer()
-                Text(Self.stageAxisFormatter.string(from: domain.startDate.addingTimeInterval(span / 2)))
-                Spacer()
-                Text(Self.stageAxisFormatter.string(from: domain.startDate.addingTimeInterval(span)))
-            }
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .padding(.horizontal, 10)
-            .accessibilityHidden(true)
+            sleepTimelineHourAxis(domain: editDomain)
             // WHOOP's per-stage insight: with a stage selected, tonight vs the 30-day typical
             // range; otherwise a quiet hint that the rows are tappable. Fixed-height slot so
             // selecting a stage never reflows the card.
@@ -1183,6 +1249,33 @@ struct SleepView: View {
                 .frame(height: 30, alignment: .topLeading)
                 .padding(.horizontal, 2)
         }
+    }
+
+    /// A stable clock ruler for the draggable bounds. It is deliberately based on the fixed edit
+    /// corridor, not the current asleep/woke values, so the marks never stretch beneath a drag.
+    private func sleepTimelineHourAxis(domain: SleepTimelineEditDomain) -> some View {
+        let ticks = SleepTimelineEditDomain.hourTicks(from: domain.displayStartTs, through: domain.displayEndTs)
+        return GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                ForEach(ticks, id: \.self) { timestamp in
+                    let rawX = domain.x(for: timestamp, width: geometry.size.width)
+                    let x = min(max(rawX, 18), max(18, geometry.size.width - 18))
+                    VStack(spacing: 2) {
+                        Rectangle()
+                            .fill(StrandPalette.textTertiary.opacity(0.65))
+                            .frame(width: 1, height: 4)
+                        Text(Self.stageAxisFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp))))
+                            .font(StrandFont.captionNumber)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                    .fixedSize()
+                    .position(x: x, y: 13)
+                }
+            }
+        }
+        .frame(height: 27)
+        .padding(.horizontal, 10)
+        .accessibilityHidden(true)
     }
 
     /// WHOOP's hero pair for the night: HOURS OF SLEEP and RESTORATIVE SLEEP (deep + REM), each
@@ -3027,7 +3120,7 @@ private struct SleepSessionBoundaryOverlay: View {
     let startTs: Int
     let endTs: Int
     let domain: SleepTimelineEditDomain
-    let onCommit: (Int, Int) -> Void
+    let onCommit: (SleepBoundary, Int) -> Void
 
     @State private var dragging: SleepBoundary?
     @State private var draftStartTs: Int?
@@ -3045,8 +3138,10 @@ private struct SleepSessionBoundaryOverlay: View {
             let activeStart = draftStartTs ?? startTs
             let activeEnd = draftEndTs ?? endTs
             ZStack(alignment: .topLeading) {
-                boundary(.asleep, timestamp: activeStart, width: geometry.size.width, height: geometry.size.height)
-                boundary(.woke, timestamp: activeEnd, width: geometry.size.width, height: geometry.size.height)
+                boundaryLine(timestamp: activeStart, width: geometry.size.width, height: geometry.size.height)
+                boundaryLine(timestamp: activeEnd, width: geometry.size.width, height: geometry.size.height)
+                boundaryHandle(.asleep, timestamp: activeStart, width: geometry.size.width)
+                boundaryHandle(.woke, timestamp: activeEnd, width: geometry.size.width)
             }
             .coordinateSpace(name: "sleepSessionBoundaryAxis")
         }
@@ -3054,28 +3149,30 @@ private struct SleepSessionBoundaryOverlay: View {
     }
 
     @ViewBuilder
-    private func boundary(_ boundary: SleepBoundary, timestamp: Int, width: CGFloat, height: CGFloat) -> some View {
+    private func boundaryLine(timestamp: Int, width: CGFloat, height: CGFloat) -> some View {
+        let x = domain.x(for: timestamp, width: width)
+        Rectangle()
+            .fill(StrandPalette.textPrimary.opacity(0.7))
+            .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight))
+            .position(x: x, y: NoopMetrics.sourceBadgeHeight + max(1, height - NoopMetrics.sourceBadgeHeight) / 2)
+            .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func boundaryHandle(_ boundary: SleepBoundary, timestamp: Int, width: CGFloat) -> some View {
         let x = domain.x(for: timestamp, width: width)
         let label = boundary == .asleep ? "Asleep" : "Woke"
-        ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(StrandPalette.textPrimary.opacity(0.7))
-                .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight))
-                .position(x: x, y: NoopMetrics.sourceBadgeHeight + max(1, height - NoopMetrics.sourceBadgeHeight) / 2)
-                .allowsHitTesting(false)
-            Text(label)
-                .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .padding(.horizontal, NoopMetrics.space1)
-                .padding(.vertical, 3)
-                .frame(width: 72, height: NoopMetrics.sourceBadgeHeight)
-                .background(Capsule().fill(StrandPalette.surfaceRaised))
-                .contentShape(Capsule())
-                .gesture(dragGesture(boundary, width: width))
-                .position(x: x, y: NoopMetrics.sourceBadgeHeight / 2)
-        }
-        .frame(width: width, height: height, alignment: .topLeading)
+        Text(label)
+            .font(StrandFont.overline)
+            .tracking(StrandFont.overlineTracking)
+            .foregroundStyle(StrandPalette.textPrimary)
+            .padding(.horizontal, NoopMetrics.space1)
+            .padding(.vertical, 3)
+            .frame(width: 72, height: NoopMetrics.sourceBadgeHeight)
+            .background(Capsule().fill(StrandPalette.surfaceRaised))
+            .contentShape(Capsule())
+            .gesture(dragGesture(boundary, width: width))
+            .position(x: x, y: NoopMetrics.sourceBadgeHeight / 2)
         .accessibilityLabel("\(label), \(Self.formatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp))))")
         .accessibilityHint("Drag to correct the \(label.lowercased()) time")
     }
@@ -3112,11 +3209,10 @@ private struct SleepSessionBoundaryOverlay: View {
 
     private func finish(_ boundary: SleepBoundary, x: CGFloat, width: CGFloat) {
         update(boundary, x: x, width: width)
-        let newStart = draftStartTs ?? startTs
-        let newEnd = draftEndTs ?? endTs
+        let newTimestamp = boundary == .asleep ? (draftStartTs ?? startTs) : (draftEndTs ?? endTs)
         clearDraft()
-        guard newStart != startTs || newEnd != endTs else { return }
-        onCommit(newStart, newEnd)
+        guard newTimestamp != (boundary == .asleep ? startTs : endTs) else { return }
+        onCommit(boundary, newTimestamp)
     }
 
     private func clearDraft() {
@@ -3258,6 +3354,13 @@ private struct SleepUndoBanner {
     let identityStart: Int
     let displayStart: Int
     let windowEnd: Int
+}
+
+private struct SleepBoundaryUndo {
+    let detectedStartTs: Int
+    let priorStartTs: Int
+    let priorEndTs: Int
+    let priorStagesJSON: String?
 }
 
 private struct WakeEdit: Identifiable {

@@ -8,6 +8,23 @@ enum SleepBoundary {
     case woke
 }
 
+/// A single-handle save command. The stationary bound is copied verbatim, preventing a drag on one
+/// marker from accidentally committing a change to the other marker.
+struct SleepBoundaryCommit: Equatable {
+    let startTs: Int
+    let endTs: Int
+
+    static func window(changing boundary: SleepBoundary, to timestamp: Int,
+                       startTs: Int, endTs: Int) -> SleepBoundaryCommit {
+        switch boundary {
+        case .asleep:
+            SleepBoundaryCommit(startTs: timestamp, endTs: endTs)
+        case .woke:
+            SleepBoundaryCommit(startTs: startTs, endTs: timestamp)
+        }
+    }
+}
+
 struct SleepTimelineEditDomain: Equatable {
     static let marginSeconds = 90 * 60
     static let snapSeconds = 30
@@ -20,9 +37,23 @@ struct SleepTimelineEditDomain: Equatable {
         self.sessionEndTs = max(sessionStartTs, sessionEndTs)
     }
 
+    /// The correction values are deliberately ignored: this coordinate space is anchored to the
+    /// detector's immutable observed window, so a saved marker never makes its graph resize.
+    init(detectedStartTs: Int, detectedEndTs: Int, adjustedStartTs: Int, adjustedEndTs: Int) {
+        self.init(sessionStartTs: detectedStartTs, sessionEndTs: detectedEndTs)
+    }
+
     var displayStartTs: Int { sessionStartTs - Self.marginSeconds }
     var displayEndTs: Int { sessionEndTs + Self.marginSeconds }
     var spanSeconds: Int { max(1, displayEndTs - displayStartTs) }
+
+    /// Whole-clock-hour anchors for the drag ruler. The range is detected-data anchored, so these
+    /// labels remain visually stable while either marker moves.
+    static func hourTicks(from startTs: Int, through endTs: Int) -> [Int] {
+        let first = ((startTs / 3_600) + 1) * 3_600
+        guard first <= endTs else { return [] }
+        return Array(stride(from: first, through: endTs, by: 3_600))
+    }
 
     func x(for timestamp: Int, width: CGFloat) -> CGFloat {
         guard width > 0 else { return 0 }
@@ -85,5 +116,16 @@ struct SleepTimelineDisplayDomainCache {
 
     func cachedDomain(for sessionKey: Int) -> SleepTimelineEditDomain? {
         domains[sessionKey]
+    }
+}
+
+/// The observed-data axis for the heart-rate trace. Unlike the editable stage corridor, it has no
+/// synthetic leading/trailing margin: a missing sample must not turn into an empty-looking chart.
+struct SleepObservedTimelineDomain: Equatable {
+    let originSeconds: TimeInterval = 0
+    let spanSeconds: TimeInterval
+
+    init(sessionStartTs: Int, sessionEndTs: Int) {
+        spanSeconds = TimeInterval(max(1, abs(sessionEndTs - sessionStartTs)))
     }
 }

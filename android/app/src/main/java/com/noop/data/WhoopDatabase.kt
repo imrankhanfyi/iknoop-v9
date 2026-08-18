@@ -50,7 +50,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PpgWaveformSampleEntity::class,
         SleepAnnotationRow::class,
     ],
-    version = 22,
+    version = 23,
     exportSchema = false,
 )
 abstract class WhoopDatabase : RoomDatabase() {
@@ -507,6 +507,14 @@ abstract class WhoopDatabase : RoomDatabase() {
             }
         }
 
+        /** Additive twin of GRDB v31: preserves the detector's wake when a user corrects `endTs`. */
+        internal val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `sleepSession` ADD COLUMN `detectedEndTs` INTEGER")
+                db.execSQL("UPDATE `sleepSession` SET `detectedEndTs` = `endTs` WHERE `detectedEndTs` IS NULL")
+            }
+        }
+
         /**
          * v18 -> v19: Oura/WHOOP efficiency-unit HEAL, the Room twin of the Swift WhoopStore v26
          * `v26-efficiency-heal` GRDB migration (#376). UPDATE-only, NO schema change: the Oura API
@@ -594,7 +602,7 @@ abstract class WhoopDatabase : RoomDatabase() {
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
                     MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
                     MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18,
-                    MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22,
+                    MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23,
                 )
                 // #1037: a FRESH install builds the schema straight at the current version and runs NO
                 // migrations, so the MIGRATION_7_8 "my-whoop" registry seed never fires and the WHOOP,
