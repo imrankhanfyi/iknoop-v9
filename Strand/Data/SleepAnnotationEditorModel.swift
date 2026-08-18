@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import StrandDesign
 import WhoopStore
 
 /// One coordinate domain shared by sleep stages, annotations, and clock labels.
@@ -16,6 +17,22 @@ struct SleepAnnotationTimelineDomain {
     }
     var startDate: Date {
         Date(timeIntervalSince1970: TimeInterval(bounds.lowerBound) / 1_000)
+    }
+}
+
+/// The exact stage-row input consumed by `SleepView`, deliberately independent of annotation state.
+struct SleepStageTimelineLayout {
+    let intervals: [SleepInterval]
+    let originSeconds: TimeInterval
+    let spanSeconds: TimeInterval
+
+    init(intervals: [SleepInterval], domain: SleepAnnotationTimelineDomain) {
+        self.intervals = Hypnogram.displaySmoothed(
+            intervals.sorted { $0.start < $1.start },
+            minDuration: 90
+        )
+        originSeconds = domain.originSeconds
+        spanSeconds = domain.spanSeconds
     }
 }
 
@@ -71,6 +88,14 @@ final class SleepAnnotationEditorModel: ObservableObject {
     /// Equal-time labels use their canonical type order, matching the store's deterministic ordering.
     static func stackedLabelLevel(for row: SleepAnnotationRow, in rows: [SleepAnnotationRow]) -> Int {
         rows.filter { $0.deviceId == row.deviceId && $0.tsMs == row.tsMs && $0.type.rawValue < row.type.rawValue }.count
+    }
+
+    /// Supplies the production stage-row layout without consulting annotation state.
+    func stageTimelineLayout(
+        intervals: [SleepInterval],
+        domain: SleepAnnotationTimelineDomain
+    ) -> SleepStageTimelineLayout {
+        SleepStageTimelineLayout(intervals: intervals, domain: domain)
     }
 
     func load(deviceId: String, fromTsMs: Int64, toTsMs: Int64,
@@ -148,7 +173,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
 
     private func performMove(_ row: SleepAnnotationRow, toTsMs: Int64, mutation: MoveMutation?,
                              requestedRevision: Int) async {
-        guard accepts(row), accepts(deviceId: row.deviceId, tsMs: toTsMs) else { return }
+        guard acceptsExisting(row), accepts(deviceId: row.deviceId, tsMs: toTsMs) else { return }
         guard row.tsMs != toTsMs else { return }
         let replacement = SleepAnnotationRow(deviceId: row.deviceId, tsMs: toTsMs, type: row.type)
         let snapshot = snapshot()
@@ -177,7 +202,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
 
     private func performReplace(_ row: SleepAnnotationRow, with type: SleepAnnotationType,
                                 mutation: ReplaceMutation?, requestedRevision: Int) async {
-        guard accepts(row) else { return }
+        guard acceptsExisting(row) else { return }
         guard row.type != type else { return }
         let replacement = SleepAnnotationRow(deviceId: row.deviceId, tsMs: row.tsMs, type: type)
         let snapshot = snapshot()
@@ -204,7 +229,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
 
     private func performDelete(_ row: SleepAnnotationRow, mutation: DeleteMutation?,
                                requestedRevision: Int) async {
-        guard accepts(row) else { return }
+        guard acceptsExisting(row) else { return }
         let snapshot = snapshot()
         annotations.removeAll { $0 == row }
         if selected == row { selected = nil }
@@ -226,8 +251,8 @@ final class SleepAnnotationEditorModel: ObservableObject {
         return opened
     }
 
-    private func accepts(_ row: SleepAnnotationRow) -> Bool {
-        accepts(deviceId: row.deviceId, tsMs: row.tsMs)
+    private func acceptsExisting(_ row: SleepAnnotationRow) -> Bool {
+        annotations.contains(row) && accepts(deviceId: row.deviceId, tsMs: row.tsMs)
     }
 
     private func accepts(deviceId: String, tsMs: Int64) -> Bool {

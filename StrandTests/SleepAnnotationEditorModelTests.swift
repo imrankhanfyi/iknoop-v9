@@ -55,6 +55,23 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
         XCTAssertEqual(model.annotations, [])
     }
 
+    func testSameDeviceRowFromOverlappingPreviousWindowCannotMutateCurrentWindow() async {
+        let stale = SleepAnnotationRow(deviceId: "a", tsMs: 180_000, type: .inBed)
+        let current = SleepAnnotationRow(deviceId: "a", tsMs: 210_000, type: .arose)
+        let model = SleepAnnotationEditorModel()
+        await model.load(deviceId: "a", fromTsMs: 0, toTsMs: 200_000) { _, _, _ in [stale] }
+        await model.load(deviceId: "a", fromTsMs: 120_000, toTsMs: 300_000) { _, _, _ in [current] }
+
+        var staleMutationRan = false
+        await model.move(stale, toTsMs: 240_000) { _, _ in
+            staleMutationRan = true
+        }
+
+        XCTAssertFalse(staleMutationRan)
+        XCTAssertEqual(model.annotations, [current])
+        XCTAssertNil(model.selected)
+    }
+
     func testSlowerPriorWindowLoadCannotReplaceNewerWindow() async {
         let oldRow = SleepAnnotationRow(deviceId: "old", tsMs: 60_000, type: .inBed)
         let newRow = SleepAnnotationRow(deviceId: "new", tsMs: 180_000, type: .arose)
@@ -111,10 +128,39 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
         XCTAssertEqual(model.selected, later)
     }
 
-    func testFailedAddRestoresExactPriorAnnotationsAndDoesNotChangeEvaluatedStageOutput() async {
+    func testProductionStageTimelineLayoutIsInvariantAcrossSuccessfulAnnotationMutations() async {
+        let initial = SleepAnnotationRow(deviceId: "a", tsMs: 60_000, type: .inBed)
+        let model = await loadedModel([initial], selected: initial)
+        let intervals = stageIntervalInput()
+        let expected = StageTimelineOutput(
+            intervals: [
+                StageOutput(stage: .light, start: 0, end: 120),
+                StageOutput(stage: .deep, start: 120, end: 300),
+            ],
+            originSeconds: 0,
+            spanSeconds: 300
+        )
+        XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
+
+        await model.add(deviceId: "a", type: .fellAsleep, tsMs: 90_000) { _ in }
+        XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
+
+        let added = SleepAnnotationRow(deviceId: "a", tsMs: 90_000, type: .fellAsleep)
+        await model.move(added, toTsMs: 120_000) { _, _ in }
+        XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
+
+        let moved = SleepAnnotationRow(deviceId: "a", tsMs: 120_000, type: .fellAsleep)
+        await model.replace(moved, with: .awakeInBed) { _, _ in }
+        XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
+
+        let replaced = SleepAnnotationRow(deviceId: "a", tsMs: 120_000, type: .awakeInBed)
+        await model.delete(replaced) { _ in }
+        XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
+    }
+
+    func testFailedAddRestoresExactPriorAnnotationsAndSelection() async {
         let prior = [SleepAnnotationRow(deviceId: "a", tsMs: 60_000, type: .inBed)]
         let model = await loadedModel(prior, selected: prior[0])
-        let stagesBefore = evaluatedStageOutput()
 
         await model.add(deviceId: "a", type: .arose, tsMs: 90_000) { _ in
             throw MutationError.rejected
@@ -122,14 +168,12 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
 
         XCTAssertEqual(model.annotations, prior)
         XCTAssertEqual(model.selected, prior[0])
-        XCTAssertEqual(evaluatedStageOutput(), stagesBefore)
     }
 
-    func testFailedMoveRestoresExactPriorAnnotationsAndDoesNotChangeEvaluatedStageOutput() async {
+    func testFailedMoveRestoresExactPriorAnnotationsAndSelection() async {
         let row = SleepAnnotationRow(deviceId: "a", tsMs: 60_000, type: .inBed)
         let prior = [row, SleepAnnotationRow(deviceId: "a", tsMs: 90_000, type: .arose)]
         let model = await loadedModel(prior, selected: row)
-        let stagesBefore = evaluatedStageOutput()
 
         await model.move(row, toTsMs: 120_000) { _, _ in
             throw MutationError.rejected
@@ -137,14 +181,12 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
 
         XCTAssertEqual(model.annotations, prior)
         XCTAssertEqual(model.selected, row)
-        XCTAssertEqual(evaluatedStageOutput(), stagesBefore)
     }
 
-    func testFailedReplaceRestoresExactPriorAnnotationsAndDoesNotChangeEvaluatedStageOutput() async {
+    func testFailedReplaceRestoresExactPriorAnnotationsAndSelection() async {
         let row = SleepAnnotationRow(deviceId: "a", tsMs: 60_000, type: .inBed)
         let prior = [row]
         let model = await loadedModel(prior, selected: row)
-        let stagesBefore = evaluatedStageOutput()
 
         await model.replace(row, with: .fellAsleep) { _, _ in
             throw MutationError.rejected
@@ -152,14 +194,12 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
 
         XCTAssertEqual(model.annotations, prior)
         XCTAssertEqual(model.selected, row)
-        XCTAssertEqual(evaluatedStageOutput(), stagesBefore)
     }
 
-    func testFailedDeleteRestoresExactPriorAnnotationsAndDoesNotChangeEvaluatedStageOutput() async {
+    func testFailedDeleteRestoresExactPriorAnnotationsAndSelection() async {
         let row = SleepAnnotationRow(deviceId: "a", tsMs: 60_000, type: .inBed)
         let prior = [row]
         let model = await loadedModel(prior, selected: row)
-        let stagesBefore = evaluatedStageOutput()
 
         await model.delete(row) { _ in
             throw MutationError.rejected
@@ -167,7 +207,6 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
 
         XCTAssertEqual(model.annotations, prior)
         XCTAssertEqual(model.selected, row)
-        XCTAssertEqual(evaluatedStageOutput(), stagesBefore)
     }
 
     private enum MutationError: Error {
@@ -181,16 +220,33 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
         return model
     }
 
-    /// Re-evaluates the same production smoothing seam used by `SleepView.stageTimeline`.
-    private func evaluatedStageOutput() -> [StageOutput] {
-        let intervals = [
+    private func stageIntervalInput() -> [SleepInterval] {
+        [
             SleepInterval(stage: .light, start: 0, end: 120),
             SleepInterval(stage: .awake, start: 120, end: 150),
             SleepInterval(stage: .deep, start: 150, end: 300),
         ]
-        return Hypnogram.displaySmoothed(intervals, minDuration: 90).map {
-            StageOutput(stage: $0.stage, start: $0.start, end: $0.end)
-        }
+    }
+
+    private func productionStageTimelineOutput(
+        using model: SleepAnnotationEditorModel,
+        intervals: [SleepInterval]
+    ) -> StageTimelineOutput {
+        let domain = SleepAnnotationTimelineDomain(startTsMs: 0, endTsMs: 300_000)
+        let layout = model.stageTimelineLayout(intervals: intervals, domain: domain)
+        return StageTimelineOutput(
+            intervals: layout.intervals.map {
+                StageOutput(stage: $0.stage, start: $0.start, end: $0.end)
+            },
+            originSeconds: layout.originSeconds,
+            spanSeconds: layout.spanSeconds
+        )
+    }
+
+    private struct StageTimelineOutput: Equatable {
+        let intervals: [StageOutput]
+        let originSeconds: TimeInterval
+        let spanSeconds: TimeInterval
     }
 
     private struct StageOutput: Equatable {

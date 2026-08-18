@@ -1073,15 +1073,15 @@ struct SleepView: View {
     /// tangle with another stage's, which is exactly why WHOOP renders sleep this way.
     @ViewBuilder
     private func stageTimeline(_ s: Stages, intervals: [SleepInterval], night: Night) -> some View {
-        // Light display smoothing (90s) keeps WHOOP's fine tick texture while dropping epoch noise;
-        // the hypnogram needed 300s because stages shared one staircase — rows tolerate detail.
-        let smoothed = Hypnogram.displaySmoothed(intervals.sorted { $0.start < $1.start }, minDuration: 90)
         let domain = SleepAnnotationTimelineDomain(
             startTsMs: Int64(night.session.effectiveStartTs) * 1_000,
             endTsMs: Int64(night.session.endTs) * 1_000
         )
-        let origin = domain.originSeconds
-        let span = domain.spanSeconds
+        // This production seam keeps stage smoothing and coordinates independent of annotations.
+        let timeline = annotationEditor.stageTimelineLayout(intervals: intervals, domain: domain)
+        let smoothed = timeline.intervals
+        let origin = timeline.originSeconds
+        let span = timeline.spanSeconds
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             // WHOOP's hero pair: HOURS OF SLEEP + RESTORATIVE SLEEP (deep + REM), each against
             // its 30-day typical.
