@@ -2,12 +2,37 @@ import CoreGraphics
 import Foundation
 import WhoopStore
 
+/// One coordinate domain shared by sleep stages, annotations, and clock labels.
+struct SleepAnnotationTimelineDomain {
+    let bounds: ClosedRange<Int64>
+
+    init(startTsMs: Int64, endTsMs: Int64) {
+        bounds = min(startTsMs, endTsMs)...max(startTsMs, endTsMs)
+    }
+
+    var originSeconds: TimeInterval { 0 }
+    var spanSeconds: TimeInterval {
+        max(1, TimeInterval(bounds.upperBound - bounds.lowerBound) / 1_000)
+    }
+    var startDate: Date {
+        Date(timeIntervalSince1970: TimeInterval(bounds.lowerBound) / 1_000)
+    }
+}
+
+/// Stable SwiftUI identity matching the store's natural annotation key.
+struct SleepAnnotationNaturalKey: Hashable {
+    let deviceId: String
+    let tsMs: Int64
+    let typeRawValue: Int
+}
+
 /// Owns the sleep-timeline annotation draft and keeps storage failures invisible to the graph.
 ///
 /// Mutations are optimistic so a marker follows the pointer immediately. Every operation snapshots the
 /// complete prior array and selection, then restores both verbatim if the on-device write throws.
 @MainActor
 final class SleepAnnotationEditorModel: ObservableObject {
+    typealias LoadMutation = (String, Int64, Int64) async throws -> [SleepAnnotationRow]
     typealias InsertMutation = (SleepAnnotationRow) async throws -> Void
     typealias MoveMutation = (SleepAnnotationRow, Int64) async throws -> Void
     typealias ReplaceMutation = (SleepAnnotationRow, SleepAnnotationType) async throws -> Void
@@ -17,6 +42,14 @@ final class SleepAnnotationEditorModel: ObservableObject {
     @Published var selected: SleepAnnotationRow?
 
     private var store: WhoopStore?
+    private var activeWindow: Window?
+    private var contextRevision = 0
+    private var mutationTail: Task<Void, Never>?
+
+    private struct Window: Equatable {
+        let deviceId: String
+        let bounds: ClosedRange<Int64>
+    }
 
     init(annotations: [SleepAnnotationRow] = []) {
         self.annotations = annotations
@@ -40,24 +73,55 @@ final class SleepAnnotationEditorModel: ObservableObject {
         rows.filter { $0.deviceId == row.deviceId && $0.tsMs == row.tsMs && $0.type.rawValue < row.type.rawValue }.count
     }
 
-    func load(deviceId: String, fromTsMs: Int64, toTsMs: Int64) async {
+    func load(deviceId: String, fromTsMs: Int64, toTsMs: Int64,
+              fetch: LoadMutation? = nil) async {
+        let window = Window(
+            deviceId: deviceId,
+            bounds: min(fromTsMs, toTsMs)...max(fromTsMs, toTsMs)
+        )
+        contextRevision += 1
+        let requestedRevision = contextRevision
+        activeWindow = window
+        annotations = []
+        selected = nil
+
         do {
-            let store = try await ensureStore()
-            let loaded = try await store.sleepAnnotations(
-                deviceId: deviceId,
-                fromTsMs: min(fromTsMs, toTsMs),
-                toTsMs: max(fromTsMs, toTsMs)
-            )
-            guard !Task.isCancelled else { return }
-            annotations = loaded
-            if let selected, !annotations.contains(selected) { self.selected = nil }
+            let loaded: [SleepAnnotationRow]
+            if let fetch {
+                loaded = try await fetch(deviceId, window.bounds.lowerBound, window.bounds.upperBound)
+            } else {
+                let store = try await ensureStore()
+                loaded = try await store.sleepAnnotations(
+                    deviceId: deviceId,
+                    fromTsMs: window.bounds.lowerBound,
+                    toTsMs: window.bounds.upperBound
+                )
+            }
+            guard !Task.isCancelled,
+                  requestedRevision == contextRevision,
+                  activeWindow == window else { return }
+            annotations = normalized(loaded.filter {
+                $0.deviceId == window.deviceId && window.bounds.contains($0.tsMs)
+            })
         } catch {
+            guard requestedRevision == contextRevision, activeWindow == window else { return }
             NSLog("SleepAnnotationEditorModel: load failed: \(error)")
         }
     }
 
     func add(deviceId: String, type: SleepAnnotationType, tsMs: Int64,
              mutation: InsertMutation? = nil) async {
+        let requestedRevision = contextRevision
+        await enqueueMutation { [weak self] in
+            guard let self, self.contextRevision == requestedRevision else { return }
+            await self.performAdd(deviceId: deviceId, type: type, tsMs: tsMs, mutation: mutation,
+                                  requestedRevision: requestedRevision)
+        }
+    }
+
+    private func performAdd(deviceId: String, type: SleepAnnotationType, tsMs: Int64,
+                            mutation: InsertMutation?, requestedRevision: Int) async {
+        guard accepts(deviceId: deviceId, tsMs: tsMs) else { return }
         let row = SleepAnnotationRow(deviceId: deviceId, tsMs: tsMs, type: type)
         let snapshot = snapshot()
         annotations = normalized(annotations + [row])
@@ -69,11 +133,22 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).insertSleepAnnotation(row)
             }
         } catch {
-            restore(snapshot)
+            if contextRevision == requestedRevision { restore(snapshot) }
         }
     }
 
     func move(_ row: SleepAnnotationRow, toTsMs: Int64, mutation: MoveMutation? = nil) async {
+        let requestedRevision = contextRevision
+        await enqueueMutation { [weak self] in
+            guard let self, self.contextRevision == requestedRevision else { return }
+            await self.performMove(row, toTsMs: toTsMs, mutation: mutation,
+                                   requestedRevision: requestedRevision)
+        }
+    }
+
+    private func performMove(_ row: SleepAnnotationRow, toTsMs: Int64, mutation: MoveMutation?,
+                             requestedRevision: Int) async {
+        guard accepts(row), accepts(deviceId: row.deviceId, tsMs: toTsMs) else { return }
         guard row.tsMs != toTsMs else { return }
         let replacement = SleepAnnotationRow(deviceId: row.deviceId, tsMs: toTsMs, type: row.type)
         let snapshot = snapshot()
@@ -86,12 +161,23 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).moveSleepAnnotation(row, toTsMs: toTsMs)
             }
         } catch {
-            restore(snapshot)
+            if contextRevision == requestedRevision { restore(snapshot) }
         }
     }
 
     func replace(_ row: SleepAnnotationRow, with type: SleepAnnotationType,
                  mutation: ReplaceMutation? = nil) async {
+        let requestedRevision = contextRevision
+        await enqueueMutation { [weak self] in
+            guard let self, self.contextRevision == requestedRevision else { return }
+            await self.performReplace(row, with: type, mutation: mutation,
+                                      requestedRevision: requestedRevision)
+        }
+    }
+
+    private func performReplace(_ row: SleepAnnotationRow, with type: SleepAnnotationType,
+                                mutation: ReplaceMutation?, requestedRevision: Int) async {
+        guard accepts(row) else { return }
         guard row.type != type else { return }
         let replacement = SleepAnnotationRow(deviceId: row.deviceId, tsMs: row.tsMs, type: type)
         let snapshot = snapshot()
@@ -104,11 +190,21 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).replaceSleepAnnotation(row, with: type)
             }
         } catch {
-            restore(snapshot)
+            if contextRevision == requestedRevision { restore(snapshot) }
         }
     }
 
     func delete(_ row: SleepAnnotationRow, mutation: DeleteMutation? = nil) async {
+        let requestedRevision = contextRevision
+        await enqueueMutation { [weak self] in
+            guard let self, self.contextRevision == requestedRevision else { return }
+            await self.performDelete(row, mutation: mutation, requestedRevision: requestedRevision)
+        }
+    }
+
+    private func performDelete(_ row: SleepAnnotationRow, mutation: DeleteMutation?,
+                               requestedRevision: Int) async {
+        guard accepts(row) else { return }
         let snapshot = snapshot()
         annotations.removeAll { $0 == row }
         if selected == row { selected = nil }
@@ -119,7 +215,7 @@ final class SleepAnnotationEditorModel: ObservableObject {
                 try await (try await ensureStore()).deleteSleepAnnotation(row)
             }
         } catch {
-            restore(snapshot)
+            if contextRevision == requestedRevision { restore(snapshot) }
         }
     }
 
@@ -128,6 +224,26 @@ final class SleepAnnotationEditorModel: ObservableObject {
         let opened = try await WhoopStore(path: StorePaths.defaultDatabasePath())
         store = opened
         return opened
+    }
+
+    private func accepts(_ row: SleepAnnotationRow) -> Bool {
+        accepts(deviceId: row.deviceId, tsMs: row.tsMs)
+    }
+
+    private func accepts(deviceId: String, tsMs: Int64) -> Bool {
+        activeWindow?.deviceId == deviceId && activeWindow?.bounds.contains(tsMs) == true
+    }
+
+    /// Store writes run in invocation order so an older rollback can never erase a newer success.
+    private func enqueueMutation(_ operation: @escaping @MainActor () async -> Void) async {
+        let predecessor = mutationTail
+        let task = Task { @MainActor in
+            await predecessor?.value
+            guard !Task.isCancelled else { return }
+            await operation()
+        }
+        mutationTail = task
+        await task.value
     }
 
     private func normalized(_ rows: [SleepAnnotationRow]) -> [SleepAnnotationRow] {
@@ -161,5 +277,11 @@ extension SleepAnnotationType {
         case .brieflyGotUp: return String(localized: "Briefly got up")
         case .arose: return String(localized: "Arose")
         }
+    }
+}
+
+extension SleepAnnotationRow {
+    var naturalKey: SleepAnnotationNaturalKey {
+        SleepAnnotationNaturalKey(deviceId: deviceId, tsMs: tsMs, typeRawValue: type.rawValue)
     }
 }

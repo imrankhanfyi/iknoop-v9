@@ -1076,8 +1076,12 @@ struct SleepView: View {
         // Light display smoothing (90s) keeps WHOOP's fine tick texture while dropping epoch noise;
         // the hypnogram needed 300s because stages shared one staircase — rows tolerate detail.
         let smoothed = Hypnogram.displaySmoothed(intervals.sorted { $0.start < $1.start }, minDuration: 90)
-        let origin = smoothed.first?.start ?? 0
-        let span = max(1, (smoothed.map(\.end).max() ?? 1) - origin)
+        let domain = SleepAnnotationTimelineDomain(
+            startTsMs: Int64(night.session.effectiveStartTs) * 1_000,
+            endTsMs: Int64(night.session.endTs) * 1_000
+        )
+        let origin = domain.originSeconds
+        let span = domain.spanSeconds
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             // WHOOP's hero pair: HOURS OF SLEEP + RESTORATIVE SLEEP (deep + REM), each against
             // its 30-day typical.
@@ -1088,10 +1092,9 @@ struct SleepView: View {
                 .frame(height: 124)
                 .padding(.horizontal, 10)
                 .padding(.bottom, 2)
-            let bounds = (Int64(night.session.effectiveStartTs) * 1_000)...(Int64(night.session.endTs) * 1_000)
             SleepAnnotationOverlay(
                 annotations: annotationEditor.annotations,
-                bounds: bounds,
+                bounds: domain.bounds,
                 selection: $annotationEditor.selected,
                 add: { type, tsMs in
                     Task { await annotationEditor.add(deviceId: repo.deviceId, type: type, tsMs: tsMs) }
@@ -1115,11 +1118,11 @@ struct SleepView: View {
             }
             // onset · midpoint · wake clock labels, aligned with the rows' inner strips.
             HStack {
-                Text(Self.stageAxisFormatter.string(from: night.onsetDate))
+                Text(Self.stageAxisFormatter.string(from: domain.startDate))
                 Spacer()
-                Text(Self.stageAxisFormatter.string(from: night.onsetDate.addingTimeInterval(span / 2)))
+                Text(Self.stageAxisFormatter.string(from: domain.startDate.addingTimeInterval(span / 2)))
                 Spacer()
-                Text(Self.stageAxisFormatter.string(from: night.onsetDate.addingTimeInterval(span)))
+                Text(Self.stageAxisFormatter.string(from: domain.startDate.addingTimeInterval(span)))
             }
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
@@ -2852,7 +2855,7 @@ struct SleepAnnotationOverlay<Content: View>: View {
                 content()
                 GeometryReader { geometry in
                     ZStack(alignment: .topLeading) {
-                        ForEach(Array(annotations.enumerated()), id: \.offset) { _, row in
+                        ForEach(annotations, id: \.naturalKey) { row in
                             marker(row, width: geometry.size.width, height: geometry.size.height)
                         }
                     }
@@ -2869,29 +2872,34 @@ struct SleepAnnotationOverlay<Content: View>: View {
         let storedX = xPosition(for: row.tsMs, width: width)
         let displayedX = draggingRow == row ? (dragX ?? storedX) : storedX
         let labelOffset = CGFloat(level) * NoopMetrics.sourceBadgeHeight
-        let marker = Button {
+        let stemStart = labelOffset + NoopMetrics.sourceBadgeHeight
+        let stemHeight = max(1, height - stemStart)
+        let label = Button {
             selection = row
         } label: {
-            VStack(spacing: NoopMetrics.space1) {
-                Text(row.type.displayLabel)
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize()
-                    .offset(y: labelOffset)
-                Rectangle()
-                    .fill(StrandPalette.textTertiary)
-                    .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight - labelOffset))
-                    .offset(y: labelOffset)
-            }
-            .frame(minWidth: NoopMetrics.controlHeight, minHeight: height, alignment: .top)
-            .contentShape(Rectangle())
+            Text(row.type.displayLabel)
+                .font(StrandFont.overline)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize()
+                .frame(height: NoopMetrics.sourceBadgeHeight)
+                .frame(minWidth: NoopMetrics.controlHeight)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .position(x: displayedX, y: height / 2)
+        .position(x: displayedX, y: labelOffset + NoopMetrics.sourceBadgeHeight / 2)
         .accessibilityLabel("\(row.type.displayLabel), \(Self.localTime(row.tsMs))")
         .accessibilityHint("Selects this sleep marker for editing")
 
-        gesture(marker, for: row, width: width)
+        ZStack(alignment: .topLeading) {
+            Rectangle()
+                .fill(StrandPalette.textTertiary)
+                .frame(width: 1, height: stemHeight)
+                .position(x: displayedX, y: stemStart + stemHeight / 2)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            gesture(label, for: row, width: width)
+        }
+        .frame(width: width, height: height, alignment: .topLeading)
     }
 
     @ViewBuilder
