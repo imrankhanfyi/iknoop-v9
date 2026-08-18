@@ -112,6 +112,10 @@ struct SleepView: View {
     /// the stage rows. Loaded once per night via `.task(id:)` on the stage card. (ryanAtriumAi #988)
     @State private var nightHR: [HRBucket] = []
 
+    /// User-authored points on the displayed in-bed timeline. The model owns its own WAL-safe store handle
+    /// and restores its exact optimistic snapshot whenever a write fails.
+    @StateObject private var annotationEditor = SleepAnnotationEditorModel()
+
     /// The transient UNDO banner shown after a suppressing delete (#65). Non-nil for ~7 seconds: carries
     /// the snapshot needed to restore the deleted night into its ORIGINAL namespace and the window text
     /// for the message. A user-created/edited delete writes no tombstone but still offers undo (restore).
@@ -659,7 +663,7 @@ struct SleepView: View {
                 ChartCard(
                     title: "Stage breakdown",
                     subtitle: subtitle,
-                    height: 524,
+                    height: 612,
                     tint: StrandPalette.restColor,
                     chart: { stageTimeline(s, intervals: intervals, night: night) }
                 )
@@ -693,10 +697,15 @@ struct SleepView: View {
         }
         // WHOOP top-chart data (ryanAtriumAi #988): 1-min sleeping-HR buckets for THIS night, reloaded
         // only when the displayed night changes (same `.task(id:)` pattern the other per-night loads use).
-        .task(id: night.session.startTs) {
+        .task(id: "\(repo.deviceId):\(night.session.effectiveStartTs):\(night.session.endTs)") {
             nightHR = await repo.hrBuckets(from: night.session.startTs,
                                            to: night.session.endTs,
                                            bucketSeconds: 60)
+            await annotationEditor.load(
+                deviceId: repo.deviceId,
+                fromTsMs: Int64(night.session.effectiveStartTs) * 1_000,
+                toTsMs: Int64(night.session.endTs) * 1_000
+            )
         }
     }
 
@@ -1079,10 +1088,31 @@ struct SleepView: View {
                 .frame(height: 124)
                 .padding(.horizontal, 10)
                 .padding(.bottom, 2)
-            stageTimelineRow(.awake, minutes: s.awake, total: s.total, intervals: smoothed, origin: origin, span: span)
-            stageTimelineRow(.light, minutes: s.light, total: s.total, intervals: smoothed, origin: origin, span: span)
-            stageTimelineRow(.deep,  minutes: s.deep,  total: s.total, intervals: smoothed, origin: origin, span: span)
-            stageTimelineRow(.rem,   minutes: s.rem,   total: s.total, intervals: smoothed, origin: origin, span: span)
+            let bounds = (Int64(night.session.effectiveStartTs) * 1_000)...(Int64(night.session.endTs) * 1_000)
+            SleepAnnotationOverlay(
+                annotations: annotationEditor.annotations,
+                bounds: bounds,
+                selection: $annotationEditor.selected,
+                add: { type, tsMs in
+                    Task { await annotationEditor.add(deviceId: repo.deviceId, type: type, tsMs: tsMs) }
+                },
+                move: { row, tsMs in
+                    Task { await annotationEditor.move(row, toTsMs: tsMs) }
+                },
+                replace: { row, type in
+                    Task { await annotationEditor.replace(row, with: type) }
+                },
+                delete: { row in
+                    Task { await annotationEditor.delete(row) }
+                }
+            ) {
+                VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                    stageTimelineRow(.awake, minutes: s.awake, total: s.total, intervals: smoothed, origin: origin, span: span)
+                    stageTimelineRow(.light, minutes: s.light, total: s.total, intervals: smoothed, origin: origin, span: span)
+                    stageTimelineRow(.deep,  minutes: s.deep,  total: s.total, intervals: smoothed, origin: origin, span: span)
+                    stageTimelineRow(.rem,   minutes: s.rem,   total: s.total, intervals: smoothed, origin: origin, span: span)
+                }
+            }
             // onset · midpoint · wake clock labels, aligned with the rows' inner strips.
             HStack {
                 Text(Self.stageAxisFormatter.string(from: night.onsetDate))
@@ -2737,6 +2767,192 @@ private struct SleepModel {
     /// Rolling 14-night sleep-debt ledger: Σ(slept − personal need) across the recent
     /// fortnight, with the per-night deltas behind it. Computed once per data change.
     let sleepDebtLedger: SleepDebtLedger
+}
+
+/// Editable marker layer laid over the four unchanged stage rows. The component owns only pointer
+/// presentation; storage and optimistic rollback remain in `SleepAnnotationEditorModel`.
+struct SleepAnnotationOverlay<Content: View>: View {
+    let annotations: [SleepAnnotationRow]
+    let bounds: ClosedRange<Int64>
+    @Binding var selection: SleepAnnotationRow?
+    let add: (SleepAnnotationType, Int64) -> Void
+    let move: (SleepAnnotationRow, Int64) -> Void
+    let replace: (SleepAnnotationRow, SleepAnnotationType) -> Void
+    let delete: (SleepAnnotationRow) -> Void
+    @ViewBuilder let content: () -> Content
+
+    @State private var draggingRow: SleepAnnotationRow?
+    @State private var dragX: CGFloat?
+
+    private static var clockFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.setLocalizedDateFormatFromTemplate("jmm")
+        return formatter
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            HStack(spacing: NoopMetrics.space2) {
+                Text("SLEEP MARKERS")
+                    .font(StrandFont.overline)
+                    .tracking(StrandFont.overlineTracking)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                Spacer()
+                Menu {
+                    ForEach(SleepAnnotationType.allCases, id: \.rawValue) { type in
+                        Button(type.displayLabel) {
+                            add(type, SleepAnnotationEditorModel.snappedTimestamp(
+                                x: 1, width: 2,
+                                startTsMs: bounds.lowerBound,
+                                endTsMs: bounds.upperBound
+                            ))
+                        }
+                    }
+                } label: {
+                    Label("+ Marker", systemImage: "plus")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
+                .accessibilityLabel("Add sleep marker")
+            }
+            .padding(.horizontal, NoopMetrics.space3)
+
+            if let selection {
+                HStack(spacing: NoopMetrics.space2) {
+                    Menu {
+                        ForEach(SleepAnnotationType.allCases, id: \.rawValue) { type in
+                            Button(type.displayLabel) { replace(selection, type) }
+                        }
+                    } label: {
+                        HStack(spacing: NoopMetrics.space1) {
+                            Text(selection.type.displayLabel)
+                            Image(systemName: "chevron.down")
+                        }
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    }
+                    Text(Self.localTime(selection.tsMs))
+                        .font(StrandFont.captionNumber)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer()
+                    Button("Delete") { delete(selection) }
+                        .buttonStyle(.noopGhost)
+                }
+                .padding(.horizontal, NoopMetrics.space3)
+                .padding(.vertical, NoopMetrics.space1)
+                .background(
+                    RoundedRectangle(cornerRadius: NoopMetrics.space2, style: .continuous)
+                        .fill(StrandPalette.surfaceInset)
+                )
+                .accessibilityElement(children: .contain)
+            }
+
+            ZStack(alignment: .topLeading) {
+                content()
+                GeometryReader { geometry in
+                    ZStack(alignment: .topLeading) {
+                        ForEach(Array(annotations.enumerated()), id: \.offset) { _, row in
+                            marker(row, width: geometry.size.width, height: geometry.size.height)
+                        }
+                    }
+                    .coordinateSpace(name: "sleepAnnotationAxis")
+                }
+                .padding(.horizontal, NoopMetrics.rowSpacing)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func marker(_ row: SleepAnnotationRow, width: CGFloat, height: CGFloat) -> some View {
+        let level = SleepAnnotationEditorModel.stackedLabelLevel(for: row, in: annotations)
+        let storedX = xPosition(for: row.tsMs, width: width)
+        let displayedX = draggingRow == row ? (dragX ?? storedX) : storedX
+        let labelOffset = CGFloat(level) * NoopMetrics.sourceBadgeHeight
+        let marker = Button {
+            selection = row
+        } label: {
+            VStack(spacing: NoopMetrics.space1) {
+                Text(row.type.displayLabel)
+                    .font(StrandFont.overline)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize()
+                    .offset(y: labelOffset)
+                Rectangle()
+                    .fill(StrandPalette.textTertiary)
+                    .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight - labelOffset))
+                    .offset(y: labelOffset)
+            }
+            .frame(minWidth: NoopMetrics.controlHeight, minHeight: height, alignment: .top)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .position(x: displayedX, y: height / 2)
+        .accessibilityLabel("\(row.type.displayLabel), \(Self.localTime(row.tsMs))")
+        .accessibilityHint("Selects this sleep marker for editing")
+
+        gesture(marker, for: row, width: width)
+    }
+
+    @ViewBuilder
+    private func gesture<V: View>(_ view: V, for row: SleepAnnotationRow, width: CGFloat) -> some View {
+        #if os(iOS)
+        view.gesture(
+            LongPressGesture(minimumDuration: 0.35)
+                .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("sleepAnnotationAxis")))
+                .onChanged { value in
+                    if case let .second(true, drag?) = value {
+                        draggingRow = row
+                        dragX = SleepAnnotationEditorModel.clampedX(drag.location.x, width: width)
+                    }
+                }
+                .onEnded { value in
+                    guard case let .second(true, drag?) = value else {
+                        clearDrag()
+                        return
+                    }
+                    finishDrag(row, x: drag.location.x, width: width)
+                }
+        )
+        #else
+        view.gesture(
+            DragGesture(minimumDistance: 2, coordinateSpace: .named("sleepAnnotationAxis"))
+                .onChanged { value in
+                    draggingRow = row
+                    dragX = SleepAnnotationEditorModel.clampedX(value.location.x, width: width)
+                }
+                .onEnded { value in
+                    finishDrag(row, x: value.location.x, width: width)
+                }
+        )
+        #endif
+    }
+
+    private func finishDrag(_ row: SleepAnnotationRow, x: CGFloat, width: CGFloat) {
+        let tsMs = SleepAnnotationEditorModel.snappedTimestamp(
+            x: x, width: width,
+            startTsMs: bounds.lowerBound,
+            endTsMs: bounds.upperBound
+        )
+        clearDrag()
+        move(row, tsMs)
+    }
+
+    private func clearDrag() {
+        draggingRow = nil
+        dragX = nil
+    }
+
+    private func xPosition(for tsMs: Int64, width: CGFloat) -> CGFloat {
+        let duration = bounds.upperBound - bounds.lowerBound
+        guard duration > 0 else { return 0 }
+        let fraction = Double(tsMs - bounds.lowerBound) / Double(duration)
+        return SleepAnnotationEditorModel.clampedX(CGFloat(fraction) * width, width: width)
+    }
+
+    private static func localTime(_ tsMs: Int64) -> String {
+        clockFormatter.string(from: Date(timeIntervalSince1970: Double(tsMs) / 1_000))
+    }
 }
 
 private struct Stages {
