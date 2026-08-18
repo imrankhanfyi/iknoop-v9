@@ -116,6 +116,10 @@ struct SleepView: View {
     /// and restores its exact optimistic snapshot whenever a write fails.
     @StateObject private var annotationEditor = SleepAnnotationEditorModel()
 
+    /// The initially displayed corridor for each immutable detected sleep key. User corrections move
+    /// boundary markers within this space; they never rescale the graph the user is manipulating.
+    @State private var sleepTimelineDomains = SleepTimelineDisplayDomainCache()
+
     /// The transient UNDO banner shown after a suppressing delete (#65). Non-nil for ~7 seconds: carries
     /// the snapshot needed to restore the deleted night into its ORIGINAL namespace and the window text
     /// for the message. A user-created/edited delete writes no tombstone but still offers undo (restore).
@@ -1081,10 +1085,12 @@ struct SleepView: View {
     /// tangle with another stage's, which is exactly why WHOOP renders sleep this way.
     @ViewBuilder
     private func stageTimeline(_ s: Stages, intervals: [SleepInterval], night: Night) -> some View {
-        let editDomain = SleepTimelineEditDomain(
+        let timelineKey = night.editTarget?.startTs ?? night.session.startTs
+        let proposedEditDomain = SleepTimelineEditDomain(
             sessionStartTs: night.session.effectiveStartTs,
             sessionEndTs: night.session.endTs
         )
+        let editDomain = sleepTimelineDomains.cachedDomain(for: timelineKey) ?? proposedEditDomain
         let domain = SleepAnnotationTimelineDomain(
             startTsMs: Int64(editDomain.displayStartTs) * 1_000,
             endTsMs: Int64(editDomain.displayEndTs) * 1_000,
@@ -1150,6 +1156,13 @@ struct SleepView: View {
                         }
                     }
                 }
+            }
+            .task(id: timelineKey) {
+                _ = sleepTimelineDomains.domain(
+                    for: timelineKey,
+                    sessionStartTs: night.session.effectiveStartTs,
+                    sessionEndTs: night.session.endTs
+                )
             }
             // onset · midpoint · wake clock labels, aligned with the rows' inner strips.
             HStack {
@@ -3044,24 +3057,25 @@ private struct SleepSessionBoundaryOverlay: View {
     private func boundary(_ boundary: SleepBoundary, timestamp: Int, width: CGFloat, height: CGFloat) -> some View {
         let x = domain.x(for: timestamp, width: width)
         let label = boundary == .asleep ? "Asleep" : "Woke"
-        VStack(spacing: 0) {
+        ZStack(alignment: .topLeading) {
+            Rectangle()
+                .fill(StrandPalette.textPrimary.opacity(0.7))
+                .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight))
+                .position(x: x, y: NoopMetrics.sourceBadgeHeight + max(1, height - NoopMetrics.sourceBadgeHeight) / 2)
+                .allowsHitTesting(false)
             Text(label)
                 .font(StrandFont.overline)
                 .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(StrandPalette.textPrimary)
                 .padding(.horizontal, NoopMetrics.space1)
                 .padding(.vertical, 3)
+                .frame(width: 72, height: NoopMetrics.sourceBadgeHeight)
                 .background(Capsule().fill(StrandPalette.surfaceRaised))
-                .fixedSize(horizontal: true, vertical: false)
-            Rectangle()
-                .fill(StrandPalette.textPrimary.opacity(0.7))
-                .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight))
+                .contentShape(Capsule())
+                .gesture(dragGesture(boundary, width: width))
+                .position(x: x, y: NoopMetrics.sourceBadgeHeight / 2)
         }
-            .frame(minWidth: NoopMetrics.controlHeight)
-            .frame(height: height, alignment: .top)
-        .position(x: x, y: height / 2)
-        .contentShape(Rectangle())
-        .gesture(dragGesture(boundary, width: width))
+        .frame(width: width, height: height, alignment: .topLeading)
         .accessibilityLabel("\(label), \(Self.formatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp))))")
         .accessibilityHint("Drag to correct the \(label.lowercased()) time")
     }

@@ -31,4 +31,14 @@ final class SleepTimelineEditDomainTests: XCTestCase {
         XCTAssertEqual(domain.x(for: 10_000, width: 208), 54, accuracy: 0.001)
         XCTAssertEqual(domain.x(for: 20_000, width: 208), 154, accuracy: 0.001)
     }
+
+    func testDisplayWindowRemainsFixedWhenThisNightsBoundariesChange() {
+        var cache = SleepTimelineDisplayDomainCache()
+        let first = cache.domain(for: 10_000, sessionStartTs: 10_000, sessionEndTs: 20_000)
+        let afterAsleepCorrection = cache.domain(for: 10_000, sessionStartTs: 7_300, sessionEndTs: 20_000)
+        let afterWakeCorrection = cache.domain(for: 10_000, sessionStartTs: 7_300, sessionEndTs: 24_200)
+
+        XCTAssertEqual(afterAsleepCorrection, first)
+        XCTAssertEqual(afterWakeCorrection, first)
+    }
 }

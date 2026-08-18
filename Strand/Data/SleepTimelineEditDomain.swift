@@ -70,3 +70,20 @@ struct SleepTimelineEditDomain: Equatable {
         min(max(value, lower), upper)
     }
 }
+
+/// Retains the display corridor initially shown for each immutable detected-session key. A correction
+/// changes the sleep window, but must not make its already-visible graph stretch or shift beneath it.
+struct SleepTimelineDisplayDomainCache {
+    private var domains: [Int: SleepTimelineEditDomain] = [:]
+
+    mutating func domain(for sessionKey: Int, sessionStartTs: Int, sessionEndTs: Int) -> SleepTimelineEditDomain {
+        if let domain = domains[sessionKey] { return domain }
+        let domain = SleepTimelineEditDomain(sessionStartTs: sessionStartTs, sessionEndTs: sessionEndTs)
+        domains[sessionKey] = domain
+        return domain
+    }
+
+    func cachedDomain(for sessionKey: Int) -> SleepTimelineEditDomain? {
+        domains[sessionKey]
+    }
+}
