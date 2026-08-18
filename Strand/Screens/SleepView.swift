@@ -1123,13 +1123,13 @@ struct SleepView: View {
                     Task { await annotationEditor.delete(row) }
                 }
             ) {
-                ZStack(alignment: .topLeading) {
-                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                        stageTimelineRow(.awake, minutes: s.awake, total: s.total, intervals: smoothed, origin: origin, span: span)
-                        stageTimelineRow(.light, minutes: s.light, total: s.total, intervals: smoothed, origin: origin, span: span)
-                        stageTimelineRow(.deep,  minutes: s.deep,  total: s.total, intervals: smoothed, origin: origin, span: span)
-                        stageTimelineRow(.rem,   minutes: s.rem,   total: s.total, intervals: smoothed, origin: origin, span: span)
-                    }
+                VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                    stageTimelineRow(.awake, minutes: s.awake, total: s.total, intervals: smoothed, origin: origin, span: span)
+                    stageTimelineRow(.light, minutes: s.light, total: s.total, intervals: smoothed, origin: origin, span: span)
+                    stageTimelineRow(.deep,  minutes: s.deep,  total: s.total, intervals: smoothed, origin: origin, span: span)
+                    stageTimelineRow(.rem,   minutes: s.rem,   total: s.total, intervals: smoothed, origin: origin, span: span)
+                }
+                .overlay(alignment: .topLeading) {
                     if let target = night.editTarget {
                         SleepSessionBoundaryOverlay(
                             startTs: night.session.effectiveStartTs,
@@ -3044,7 +3044,6 @@ private struct SleepSessionBoundaryOverlay: View {
     private func boundary(_ boundary: SleepBoundary, timestamp: Int, width: CGFloat, height: CGFloat) -> some View {
         let x = domain.x(for: timestamp, width: width)
         let label = boundary == .asleep ? "Asleep" : "Woke"
-        let alignment: Alignment = boundary == .asleep ? .leading : .trailing
         VStack(spacing: 0) {
             Text(label)
                 .font(StrandFont.overline)
@@ -3053,11 +3052,13 @@ private struct SleepSessionBoundaryOverlay: View {
                 .padding(.horizontal, NoopMetrics.space1)
                 .padding(.vertical, 3)
                 .background(Capsule().fill(StrandPalette.surfaceRaised))
+                .fixedSize(horizontal: true, vertical: false)
             Rectangle()
                 .fill(StrandPalette.textPrimary.opacity(0.7))
                 .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight))
         }
-        .frame(width: NoopMetrics.controlHeight, height: height, alignment: alignment)
+            .frame(minWidth: NoopMetrics.controlHeight)
+            .frame(height: height, alignment: .top)
         .position(x: x, y: height / 2)
         .contentShape(Rectangle())
         .gesture(dragGesture(boundary, width: width))
