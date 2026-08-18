@@ -81,13 +81,15 @@ final class DeviceRegistryStoreTests: XCTestCase {
         let dbq = try makeDB()
         let store = DeviceRegistryStore(dbQueue: dbq)
 
-        // Seed apple-health + my-whoop rows in two device-scoped tables (appleDaily + metricSeries).
+        // Seed apple-health + my-whoop rows in device-scoped tables, including sleep annotations.
         try dbq.write { db in
             for dev in ["apple-health", "my-whoop"] {
                 try db.execute(sql: "INSERT INTO appleDaily (deviceId, day, steps) VALUES (?, ?, ?)",
                                arguments: [dev, "2026-06-15", 1234])
                 try db.execute(sql: "INSERT INTO metricSeries (deviceId, day, key, value) VALUES (?, ?, ?, ?)",
                                arguments: [dev, "2026-06-15", "steps", 1234.0])
+                try db.execute(sql: "INSERT INTO sleepAnnotation (deviceId, tsMs, type) VALUES (?, ?, ?)",
+                               arguments: [dev, 60_000, 0])
             }
         }
 
@@ -101,6 +103,7 @@ final class DeviceRegistryStoreTests: XCTestCase {
         // Both devices start with a row in each table.
         XCTAssertEqual(try count("appleDaily", "apple-health"), 1)
         XCTAssertEqual(try count("metricSeries", "apple-health"), 1)
+        XCTAssertEqual(try count("sleepAnnotation", "apple-health"), 1)
         XCTAssertEqual(try count("appleDaily", "my-whoop"), 1)
 
         try store.deleteAllData(deviceId: "apple-health")
@@ -108,8 +111,10 @@ final class DeviceRegistryStoreTests: XCTestCase {
         // The apple-health rows are gone everywhere; my-whoop's rows survive.
         XCTAssertEqual(try count("appleDaily", "apple-health"), 0)
         XCTAssertEqual(try count("metricSeries", "apple-health"), 0)
+        XCTAssertEqual(try count("sleepAnnotation", "apple-health"), 0)
         XCTAssertEqual(try count("appleDaily", "my-whoop"), 1)
         XCTAssertEqual(try count("metricSeries", "my-whoop"), 1)
+        XCTAssertEqual(try count("sleepAnnotation", "my-whoop"), 1)
 
         // The registry row itself is never touched by a delete-data op (the seeded my-whoop remains).
         XCTAssertEqual(try store.all().count, 1)

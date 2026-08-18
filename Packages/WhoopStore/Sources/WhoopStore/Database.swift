@@ -584,6 +584,14 @@ extension WhoopStore {
                 t.add(column: "ord", .integer)
             }
         }
+        migrator.registerMigration("v30-sleep-annotations") { db in
+            try db.create(table: "sleepAnnotation") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("tsMs", .integer).notNull()
+                t.column("type", .integer).notNull()
+                t.primaryKey(["deviceId", "tsMs", "type"])
+            }
+        }
         return migrator
     }
 }

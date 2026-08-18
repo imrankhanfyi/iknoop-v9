@@ -4,6 +4,16 @@ import WhoopProtocol
 @testable import WhoopStore
 
 final class MigrationTests: XCTestCase {
+    func testV30CreatesSleepAnnotationWithExpectedCompositePrimaryKey() throws {
+        let dbQueue = try DatabaseQueue()
+        try WhoopStore.makeMigrator().migrate(dbQueue)
+        let columns = try dbQueue.read { db in
+            try Row.fetchAll(db, sql: "PRAGMA table_info(sleepAnnotation)")
+        }
+        XCTAssertEqual(columns.map { $0["name"] as String }, ["deviceId", "tsMs", "type"])
+        XCTAssertEqual(columns.map { $0["pk"] as Int }, [1, 2, 3])
+    }
+
     func testV28RebuildsHighVolumeStreamsWithoutRowidAndPreservesRows() async throws {
         let dbQueue = try DatabaseQueue()
         try WhoopStore.makeMigrator().migrate(dbQueue, upTo: "v27-ppg-waveform")
