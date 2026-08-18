@@ -705,10 +705,14 @@ struct SleepView: View {
             // old night must not install its HR or start an annotation load after `.task(id:)` moves on.
             guard !Task.isCancelled else { return }
             nightHR = loadedHR
+            let editDomain = SleepTimelineEditDomain(
+                sessionStartTs: night.session.effectiveStartTs,
+                sessionEndTs: night.session.endTs
+            )
             await annotationEditor.load(
                 deviceId: repo.deviceId,
-                fromTsMs: Int64(night.session.effectiveStartTs) * 1_000,
-                toTsMs: Int64(night.session.endTs) * 1_000
+                fromTsMs: Int64(editDomain.displayStartTs) * 1_000,
+                toTsMs: Int64(editDomain.displayEndTs) * 1_000
             )
         }
     }
@@ -1077,9 +1081,14 @@ struct SleepView: View {
     /// tangle with another stage's, which is exactly why WHOOP renders sleep this way.
     @ViewBuilder
     private func stageTimeline(_ s: Stages, intervals: [SleepInterval], night: Night) -> some View {
+        let editDomain = SleepTimelineEditDomain(
+            sessionStartTs: night.session.effectiveStartTs,
+            sessionEndTs: night.session.endTs
+        )
         let domain = SleepAnnotationTimelineDomain(
-            startTsMs: Int64(night.session.effectiveStartTs) * 1_000,
-            endTsMs: Int64(night.session.endTs) * 1_000
+            startTsMs: Int64(editDomain.displayStartTs) * 1_000,
+            endTsMs: Int64(editDomain.displayEndTs) * 1_000,
+            stageStartTsMs: Int64(night.session.effectiveStartTs) * 1_000
         )
         // This production seam keeps stage smoothing and coordinates independent of annotations.
         let timeline = annotationEditor.stageTimelineLayout(intervals: intervals, domain: domain)
@@ -1114,11 +1123,32 @@ struct SleepView: View {
                     Task { await annotationEditor.delete(row) }
                 }
             ) {
-                VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                    stageTimelineRow(.awake, minutes: s.awake, total: s.total, intervals: smoothed, origin: origin, span: span)
-                    stageTimelineRow(.light, minutes: s.light, total: s.total, intervals: smoothed, origin: origin, span: span)
-                    stageTimelineRow(.deep,  minutes: s.deep,  total: s.total, intervals: smoothed, origin: origin, span: span)
-                    stageTimelineRow(.rem,   minutes: s.rem,   total: s.total, intervals: smoothed, origin: origin, span: span)
+                ZStack(alignment: .topLeading) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                        stageTimelineRow(.awake, minutes: s.awake, total: s.total, intervals: smoothed, origin: origin, span: span)
+                        stageTimelineRow(.light, minutes: s.light, total: s.total, intervals: smoothed, origin: origin, span: span)
+                        stageTimelineRow(.deep,  minutes: s.deep,  total: s.total, intervals: smoothed, origin: origin, span: span)
+                        stageTimelineRow(.rem,   minutes: s.rem,   total: s.total, intervals: smoothed, origin: origin, span: span)
+                    }
+                    if let target = night.editTarget {
+                        SleepSessionBoundaryOverlay(
+                            startTs: night.session.effectiveStartTs,
+                            endTs: night.session.endTs,
+                            domain: editDomain
+                        ) { newStartTs, newEndTs in
+                            Task {
+                                await repo.editSleepTimes(
+                                    detectedStartTs: target.startTs,
+                                    oldEndTs: target.endTs,
+                                    storedStagesJSON: target.stagesJSON,
+                                    newStartTs: newStartTs,
+                                    newEndTs: newEndTs
+                                )
+                                await intelligence.analyzeRecent()
+                                await repo.refresh()
+                            }
+                        }
+                    }
                 }
             }
             // onset · midpoint · wake clock labels, aligned with the rows' inner strips.
@@ -2974,6 +3004,110 @@ struct SleepAnnotationOverlay<Content: View>: View {
 
     private static func localTime(_ tsMs: Int64) -> String {
         clockFormatter.string(from: Date(timeIntervalSince1970: Double(tsMs) / 1_000))
+    }
+}
+
+/// Boundary controls for the recorded sleep window. Their enclosing edit domain intentionally has
+/// empty space before/after stages, making an earlier onset or later wake reachable without drawing
+/// invented physiology. Persistence is delegated to `SleepView`'s established re-stage funnel.
+private struct SleepSessionBoundaryOverlay: View {
+    let startTs: Int
+    let endTs: Int
+    let domain: SleepTimelineEditDomain
+    let onCommit: (Int, Int) -> Void
+
+    @State private var dragging: SleepBoundary?
+    @State private var draftStartTs: Int?
+    @State private var draftEndTs: Int?
+
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.setLocalizedDateFormatFromTemplate("jmm")
+        return formatter
+    }()
+
+    var body: some View {
+        GeometryReader { geometry in
+            let activeStart = draftStartTs ?? startTs
+            let activeEnd = draftEndTs ?? endTs
+            ZStack(alignment: .topLeading) {
+                boundary(.asleep, timestamp: activeStart, width: geometry.size.width, height: geometry.size.height)
+                boundary(.woke, timestamp: activeEnd, width: geometry.size.width, height: geometry.size.height)
+            }
+            .coordinateSpace(name: "sleepSessionBoundaryAxis")
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func boundary(_ boundary: SleepBoundary, timestamp: Int, width: CGFloat, height: CGFloat) -> some View {
+        let x = domain.x(for: timestamp, width: width)
+        let label = boundary == .asleep ? "Asleep" : "Woke"
+        let alignment: Alignment = boundary == .asleep ? .leading : .trailing
+        VStack(spacing: 0) {
+            Text(label)
+                .font(StrandFont.overline)
+                .tracking(StrandFont.overlineTracking)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .padding(.horizontal, NoopMetrics.space1)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(StrandPalette.surfaceRaised))
+            Rectangle()
+                .fill(StrandPalette.textPrimary.opacity(0.7))
+                .frame(width: 1, height: max(1, height - NoopMetrics.sourceBadgeHeight))
+        }
+        .frame(width: NoopMetrics.controlHeight, height: height, alignment: alignment)
+        .position(x: x, y: height / 2)
+        .contentShape(Rectangle())
+        .gesture(dragGesture(boundary, width: width))
+        .accessibilityLabel("\(label), \(Self.formatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp))))")
+        .accessibilityHint("Drag to correct the \(label.lowercased()) time")
+    }
+
+    private func dragGesture(_ boundary: SleepBoundary, width: CGFloat) -> some Gesture {
+        #if os(iOS)
+        return LongPressGesture(minimumDuration: 0.35)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("sleepSessionBoundaryAxis")))
+            .onChanged { value in
+                if case let .second(true, drag?) = value { update(boundary, x: drag.location.x, width: width) }
+            }
+            .onEnded { value in
+                guard case let .second(true, drag?) = value else { clearDraft(); return }
+                finish(boundary, x: drag.location.x, width: width)
+            }
+        #else
+        return DragGesture(minimumDistance: 2, coordinateSpace: .named("sleepSessionBoundaryAxis"))
+            .onChanged { value in update(boundary, x: value.location.x, width: width) }
+            .onEnded { value in finish(boundary, x: value.location.x, width: width) }
+        #endif
+    }
+
+    private func update(_ boundary: SleepBoundary, x: CGFloat, width: CGFloat) {
+        dragging = boundary
+        let raw = domain.seconds(forX: x, width: width)
+        let currentStart = draftStartTs ?? startTs
+        let currentEnd = draftEndTs ?? endTs
+        let normalized = boundary == .asleep
+            ? domain.normalized(start: raw, end: currentEnd, dragging: boundary)
+            : domain.normalized(start: currentStart, end: raw, dragging: boundary)
+        draftStartTs = normalized.start
+        draftEndTs = normalized.end
+    }
+
+    private func finish(_ boundary: SleepBoundary, x: CGFloat, width: CGFloat) {
+        update(boundary, x: x, width: width)
+        let newStart = draftStartTs ?? startTs
+        let newEnd = draftEndTs ?? endTs
+        clearDraft()
+        guard newStart != startTs || newEnd != endTs else { return }
+        onCommit(newStart, newEnd)
+    }
+
+    private func clearDraft() {
+        dragging = nil
+        draftStartTs = nil
+        draftEndTs = nil
     }
 }
 

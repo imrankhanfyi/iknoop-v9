@@ -6,12 +6,16 @@ import WhoopStore
 /// One coordinate domain shared by sleep stages, annotations, and clock labels.
 struct SleepAnnotationTimelineDomain {
     let bounds: ClosedRange<Int64>
+    private let stageStartTsMs: Int64
 
-    init(startTsMs: Int64, endTsMs: Int64) {
+    init(startTsMs: Int64, endTsMs: Int64, stageStartTsMs: Int64? = nil) {
         bounds = min(startTsMs, endTsMs)...max(startTsMs, endTsMs)
+        self.stageStartTsMs = stageStartTsMs ?? bounds.lowerBound
     }
 
-    var originSeconds: TimeInterval { 0 }
+    var originSeconds: TimeInterval {
+        TimeInterval(stageStartTsMs - bounds.lowerBound) / 1_000
+    }
     var spanSeconds: TimeInterval {
         max(1, TimeInterval(bounds.upperBound - bounds.lowerBound) / 1_000)
     }
