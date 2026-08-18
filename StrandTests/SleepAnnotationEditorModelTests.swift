@@ -142,19 +142,27 @@ final class SleepAnnotationEditorModelTests: XCTestCase {
         )
         XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
 
-        await model.add(deviceId: "a", type: .fellAsleep, tsMs: 90_000) { _ in }
-        XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
-
         let added = SleepAnnotationRow(deviceId: "a", tsMs: 90_000, type: .fellAsleep)
-        await model.move(added, toTsMs: 120_000) { _, _ in }
+        await model.add(deviceId: "a", type: .fellAsleep, tsMs: 90_000) { _ in }
+        XCTAssertEqual(model.annotations, [initial, added])
+        XCTAssertEqual(model.selected, added)
         XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
 
         let moved = SleepAnnotationRow(deviceId: "a", tsMs: 120_000, type: .fellAsleep)
-        await model.replace(moved, with: .awakeInBed) { _, _ in }
+        await model.move(added, toTsMs: 120_000) { _, _ in }
+        XCTAssertEqual(model.annotations, [initial, moved])
+        XCTAssertEqual(model.selected, moved)
         XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
 
         let replaced = SleepAnnotationRow(deviceId: "a", tsMs: 120_000, type: .awakeInBed)
+        await model.replace(moved, with: .awakeInBed) { _, _ in }
+        XCTAssertEqual(model.annotations, [initial, replaced])
+        XCTAssertEqual(model.selected, replaced)
+        XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
+
         await model.delete(replaced) { _ in }
+        XCTAssertEqual(model.annotations, [initial])
+        XCTAssertNil(model.selected)
         XCTAssertEqual(productionStageTimelineOutput(using: model, intervals: intervals), expected)
     }
 
