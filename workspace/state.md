@@ -94,8 +94,8 @@ Nothing here is a NOOP.app change, so no Android twin and no migration is involv
 - `~/Projects/NOOP` — active (this repo).
 - `~/Projects/NOOP-archive/repo-v1.61` — frozen v1.61 archive + full v1.62–1.68 investigation trail.
 - `~/Projects/NOOP-archive/migration-backup-2026-07-17` — pre-migration container DB + v1.68 app.
-- `~/Projects/NOOP-archive/pre-rebase-app-2026-07-18` — `/Applications` bundle backup taken before
-  the 2026-07-18 rebase. Git safety tag for that state: `backup/pre-rebase-2026-07-18` (also on `personal`).
+- ~~`~/Projects/NOOP-archive/pre-rebase-app-2026-07-18`~~ — deleted 2026-10-28 (disk cleanup), along with
+  the 07-22/07-27/07-28 app-bundle copies; the git tag still marks the pre-rebase source state. Git safety tag for that state: `backup/pre-rebase-2026-07-18` (also on `personal`).
 
 Claude Code memory lives under `~/.claude/projects/-Users-imrankhan-Projects-NOOP/` — now correctly
 keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). Launch Claude from here.
