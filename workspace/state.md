@@ -83,8 +83,11 @@ Nothing here is a NOOP.app change, so no Android twin and no migration is involv
 - **Two permanent local patches** (ride the rebase stack forever — see `CLAUDE.md` banner):
   1. Strip `com.apple.security.network.client` → OS sandbox hard-blocks all egress.
   2. Production identity `com.noopapp.noop` / `NOOP` (upstream ships this fork as `.staging`).
-- **Installed build:** `/Applications/NOOP.app` = Debug build ditto'd from this repo on 2026-07-18
-  (never re-signed — that strips the sandbox). Reads the live container
+- **Installed build:** `/Applications/NOOP.app` = Release build of `edbf4660` (code through
+  `6853aa17`, incl. migration `v31-sleep-detected-end`) ditto'd 2026-11-04 (binary mtime
+  Nov 4 11:50). About shows "9.0.1 (198)" for EVERY macOS build — `project.yml` hardcodes the Strand
+  target's `CFBundleVersion: "198"` — so identify a build by binary mtime or a `grep -c` for a
+  known string, never by the About box. (Never re-signed — that strips the sandbox.) Reads the live container
   `~/Library/Containers/com.noopapp.noop/.../OpenWhoop/whoop.sqlite` (~479k HR rows, growing).
 - **Tests (2026-07-18):** all packages green — WhoopProtocol 286/286, WhoopStore 266/266,
   StrandAnalytics 1096/1096, StrandImport 207/207 (1 env-gated skip).
@@ -96,6 +99,8 @@ Nothing here is a NOOP.app change, so no Android twin and no migration is involv
 - `~/Projects/NOOP-archive/migration-backup-2026-07-17` — pre-migration container DB + v1.68 app.
 - ~~`~/Projects/NOOP-archive/pre-rebase-app-2026-07-18`~~ — deleted 2026-10-28 (disk cleanup), along with
   the 07-22/07-27/07-28 app-bundle copies; the git tag still marks the pre-rebase source state. Git safety tag for that state: `backup/pre-rebase-2026-07-18` (also on `personal`).
+- `~/Projects/NOOP-archive/installed-app-backup-2026-11-04` (94M) — the ONE rollback copy: the
+  Aug 18 14:59 build (pre-`6853aa17`) that was installed until 2026-11-04. Replace it, don't add beside it.
 
 Claude Code memory lives under `~/.claude/projects/-Users-imrankhan-Projects-NOOP/` — now correctly
 keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). Launch Claude from here.
@@ -165,6 +170,17 @@ keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). 
    also a design-system change, so it is `ryanbr/noop`'s call, not ours.
 
 ## Recently done
+
+- 2026-11-04: **reinstalled from HEAD; explained a missing night.** The installed app was the
+  Aug 18 14:59 build, an hour older than `6853aa17` (no `v31-sleep-detected-end` in the binary), yet
+  the live DB already had v31 applied by some since-deleted test build. Result: the 8 sleepSession rows
+  from 08-19..08-26 (written by the old app) have `detectedEndTs` NULL, and v31 won't re-run to backfill
+  them — edit behaviour on those nights is untested. Rebuilt Release, verified (sandbox + bluetooth, no
+  network.client, v31 string present), ditto'd, relaunched; live HR resumed within 20s.
+  Missing night of 11-03→04 is **unrecoverable, not an app bug**: the strap's battery died while
+  unused (`RTC_LOST` + `BOOT` events 2026-09-03), and a 4.0 stores no biometrics with an invalid clock
+  (Claude memory `noop-rtc-recording-fix`). v9's ClockPolicy re-latched it on connect (`SET_RTC(16)` 11:07:23);
+  gravity rows start 11:07:24. Last sleepSession is still 2026-08-26 — confirm tonight records one.
 
 - 2026-08-09: **overnight validation found and corrected a motion-catch-up scheduling race**
   (`188d33e8`, reviewed). The installed build established a genuine WHOOP 4.0 bond, then persisted
