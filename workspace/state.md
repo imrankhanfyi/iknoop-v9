@@ -3,6 +3,10 @@
 _Last updated: 2026-08-14. This is the ongoing log for the active repo. Historical trail
 (v1.61–v1.68) is in `~/Projects/NOOP-archive/repo-v1.61/workspace/state.md`._
 
+> **On hold 2026-11-12 — phone-based upload + Hermes reading NOOP data.** The plan and open
+> questions are in `~/Projects/hermes/NEXT_STEPS.md` → "NOOP × Hermes". The phone-upload half
+> belongs in this repo; the Hermes half starts in the Hermes repo.
+
 ## NEXT PICKUP — verified BLE recovery + upstream maintenance (2026-08-14)
 
 The pending bounded motion catch-up has now been verified on the real WHOOP 4.0.  On 2026-08-13 the
