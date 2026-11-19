@@ -1,0 +1,26 @@
+[Unit]
+Description=noop-inbox (append-only drop box for phone-encrypted NOOP entries)
+After=network.target
+
+[Service]
+User=noopinbox
+Group=noopinbox
+ExecStart=/usr/bin/python3 -I /opt/noop-inbox/noop_inbox.py
+Restart=on-failure
+RestartSec=5
+# Hardening: the process can write only its inbox, sees no home dirs, gets no new privileges.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/noop-inbox
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=64M
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

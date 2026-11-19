@@ -60,6 +60,8 @@ struct ReadModel {
         var steps: Int?
         var activeKcalEst: Double?
         var sleepPerformance: Double?
+        /// Whole-day mean HR from `hrSample` (local-day bucket). Filled by `Build`, not by `days()`.
+        var meanHr: Double? = nil
     }
 
     /// `Repository.refresh` builds `days` as mergeDaily(imported, computed) then fills steps-only from
@@ -294,5 +296,52 @@ struct ReadModel {
         var sum = 0, peak = 0
         for v in values { sum += v; if v > peak { peak = v } }
         return (avg: Int((Double(sum) / Double(values.count)).rounded()), peak: peak)
+    }
+}
+
+extension ReadModel {
+    /// Mean bpm over [from, to) of the active strap's `hrSample`, or nil when the window is empty.
+    /// Bounded by `ts` range predicates (hrSample is >1.3M rows), so it is an index range scan.
+    func meanHr(deviceId: String, from: Int, to: Int, minSamples: Int) throws -> Double? {
+        var out: Double?
+        try db.query("""
+        SELECT AVG(bpm), COUNT(*) FROM hrSample
+        WHERE deviceId = \(sqlQuote(deviceId)) AND ts >= \(from) AND ts < \(to);
+        """) { r in
+            if let n = r.int(1), n >= max(1, minSamples), let m = r.double(0) { out = (m * 10).rounded() / 10 }
+        }
+        return out
+    }
+
+    /// Per-bucket integer mean bpm over a workout window, from the same `hrSample` + PPG-fallback
+    /// union and the same 8000-row cap as `reconciledHr`. Empty buckets are nil (a gap, never 0).
+    /// Returns nil when the trace has fewer than `minSamples` readings (the reconcile gate).
+    func hrTrace(deviceId: String, from: Int, to: Int, bucketS: Int = 5,
+                 minSamples: Int = 60, limit: Int = 8000) throws -> [Int?]? {
+        let q = sqlQuote(deviceId)
+        var sums: [Int: (sum: Int, n: Int)] = [:]
+        var count = 0
+        try db.query("""
+        SELECT ts, bpm FROM (
+            SELECT ts, bpm FROM hrSample
+            WHERE deviceId = \(q) AND ts >= \(from) AND ts <= \(to)
+            UNION ALL
+            SELECT p.ts, CAST(ROUND(p.bpm) AS INTEGER) AS bpm FROM ppgHrSample p
+            WHERE p.deviceId = \(q) AND p.ts >= \(from) AND p.ts <= \(to)
+              AND NOT EXISTS (
+                SELECT 1 FROM hrSample h WHERE h.deviceId = p.deviceId AND h.ts = p.ts)
+        )
+        ORDER BY ts ASC LIMIT \(limit);
+        """) { r in
+            guard let ts = r.int(0), let v = r.int(1) else { return }
+            let b = (ts - from) / bucketS
+            let cur = sums[b] ?? (0, 0)
+            sums[b] = (cur.sum + v, cur.n + 1)
+            count += 1
+        }
+        guard count >= minSamples, let last = sums.keys.max() else { return nil }
+        return (0...last).map { b in
+            sums[b].map { Int((Double($0.sum) / Double($0.n)).rounded()) }
+        }
     }
 }

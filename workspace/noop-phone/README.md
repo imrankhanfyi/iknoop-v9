@@ -13,9 +13,19 @@ globs this directory.
 
 ## Status
 
-`noop-publish`, the standalone viewer, and the daily encrypted publishing path are **built and
-verified**. The viewer is served privately over Tailscale HTTPS; see "How this gets onto the phone"
-for the operational handoff.
+`noop-publish`, the standalone viewer, and the encrypted publishing path are **built and verified**.
+The viewer is served privately over Tailscale HTTPS; see "How this gets onto the phone" for the
+operational handoff.
+
+**v2 in progress (2026-11-18)** — spec: `docs/superpowers/specs/2026-11-18-noop-phone-v2-design.md`.
+**All phases deployed 2026-11-18:** Phase 0 (15-min frontier-triggered publishing, gravity-keyed
+guard, safe failure reasons), Phase 1 (Sleep / Workouts with HR chart / Trends tabs), Phase 2 (Lifestyle
+checklist + workout edits → encrypted inbox → Mac side store; see "Inbox receiver"), Phase 3 (Effects:
+NOOP's `EffectRanker` vendored verbatim in `Sources/noop-publish/Vendored/`, restricted to explicitly
+answered days by `AnsweredEffects.swift`; `scripts/check-vendored.sh` refuses to publish on upstream
+drift). Private state lives in `~/Library/Application Support/noop-phone/` (`items.json` — the checklist,
+never in git; `lifestyle.sqlite` — the side store; publish state files). The wrapper passes
+`--max-age-hours 240`. Not yet checked on the real iPhone.
 
 **Accessibility note.** The three sleep-stage colours are NOOP's own shipped tokens
 (`StrandPalette.sleepLight`/`sleepDeep`/`sleepREM`) and they **fail** a colour-vision-deficiency
@@ -83,7 +93,10 @@ number is never mistaken for a current one.
   `mode=ro` participates in WAL locking, which is exactly why it is safe.
 - **Two hard guards** before anything is built: `hrSample` must have ≥100k rows (catches resolving the
   4 KB staging store instead of the container — which would otherwise publish a valid, *empty*
-  payload and exit 0), and the newest sample must be within 48h.
+  payload and exit 0), and the **offload frontier** — newest `gravitySample.ts`, which only arrives via
+  history offload — must be within the age limit. Not `hrSample`: live HR streams in real time while the
+  offload can lag by days (2026-11-18: HR current, gravity 7 days behind), so an HR-keyed gate passes
+  and ships week-stale nights that look fresh. The frontier is also the envelope's `dataMaxTs`.
 - **Fresh random salt and nonce every publish**, so each day's key is unique and nonce reuse across
   publishes is impossible by construction. PBKDF2-HMAC-SHA256 at 600,000 iterations; AES-256-GCM with
   a 96-bit nonce and 128-bit tag; the KDF parameters are bound as AAD so a tampered envelope cannot
@@ -111,17 +124,25 @@ Tailscale HTTPS supplies the browser secure context required by WebCrypto. Keepi
 the agent-writable Hermes tree means a Hermes agent cannot replace its JavaScript to capture the
 passphrase. The old plugin approach was rejected for both reasons; do not recreate it.
 
-### Daily publishing
+### Publishing (every 15 minutes, frontier-triggered)
 
 The Mac has a Keychain item named `noop-publish` and a per-user LaunchAgent,
-`com.noopapp.noop-phone-publish`. At 08:15 in the Mac's local Pacific time (or at the next wake after
-a missed time), it runs `scripts/publish-daily.sh`. The wrapper builds and self-tests `noop-publish`,
-creates the encrypted envelope in a private `/private/tmp` directory, transfers that file only over
-SSH, then atomically replaces `/srv/noop-health/noop-data.json` on Freckleclaw.
+`com.noopapp.noop-phone-publish` (`StartInterval` 900; source in `launchd/`). Each run of
+`scripts/publish-daily.sh` builds and self-tests `noop-publish`, then calls it with
+`--skip-unless-after <last published frontier>`: if the offload frontier has not advanced since the last
+**successful** transfer it exits 3 and the wrapper exits silently. Otherwise it creates the encrypted
+envelope in a private `/private/tmp` directory, transfers that file only over SSH, atomically replaces
+`/srv/noop-health/noop-data.json` on Freckleclaw, and only then records the frontier in
+`~/Library/Application Support/noop-phone/last-published-frontier` (so a failed transfer retries).
 
-The LaunchAgent does not wake the Mac, does not have `KeepAlive`, and writes only timestamps, build
-output, and encrypted byte counts to `~/Library/Logs/NOOP/`. A failed run leaves the previously served
-encrypted payload in place.
+Why not a fixed time: the Mac is usually closed overnight, and the strap offloads at roughly 4–10× real
+time once NOOP runs, so a night lands 1–2.5 h after the lid opens. A fixed 08:15 fired before that.
+
+The LaunchAgent does not wake the Mac and has no `KeepAlive`. Logs in `~/Library/Logs/NOOP/` carry only
+timestamps, byte counts, frontier unix times and the publisher's `noop-publish-reason:` category (e.g.
+`stale-frontier age=169.6h`) — never its summary lines. For the full error, run
+`.build/release/noop-publish --out <scratch dir>` by hand. `scripts/test-publish-daily.sh` holds the
+wrapper's contract tests.
 
 Operational checks:
 
@@ -137,6 +158,25 @@ shows the latest encrypted snapshot; the viewer displays its age.
 Optional and separable (Phase 2 of the plan, never built): a morning recovery digest pushed to Telegram
 by the Mac with `deliver_only: true`. It inherently puts a few numbers in front of Telegram and the VPS
 in plaintext, which is why it is opt-in and why the viewer stands alone without it.
+
+## Inbox receiver (`receiver/`, deployed 2026-11-18)
+
+Write-back path for the phone (lifestyle check-ins, workout edits). `noop_inbox.py` is a stdlib-only
+Python drop box on Freckleclaw: user `noopinbox`, systemd unit `noop-inbox.service` (hardened:
+`ProtectSystem=strict`, writes only `/srv/noop-inbox`), bound to `127.0.0.1:8650`, mounted by
+`tailscale serve` at `https://freckleclaw.tail4d0805.ts.net:8444/inbox` — same origin as the viewer.
+
+- Entries are AES-256-GCM sealed **on the phone**; the server holds ciphertext only. POST only, ≤16 KB,
+  idempotent by UUID; no read endpoint — the Mac pulls over SSH and deletes after committing locally.
+- Writes need `Authorization: Bearer <token>`; token and entry key both derive from the viewer passphrase
+  (derivation in the module docstring; `token_hash.py --selftest` prints the cross-language test
+  vectors). The server stores only `SHA-256(token)` in `/etc/noop-inbox/token.sha256`.
+- Isolation from Hermes, verified 2026-11-18: the Hermes containers are on Docker bridge networking; a
+  POST from inside `hermes` to the tailnet `:8444` timed out (curl exit 28), and the receiver binds
+  loopback only. The token makes writes fail closed even if that changes.
+- Rotating the passphrase: re-run `token_hash.py` and replace `token.sha256`.
+- Tests: `python3 -I receiver/test_noop_inbox.py` (12 contract cases). Rollback: serve config backup in
+  `/root/noop-backups/`; `tailscale serve --https=8444 --set-path=/inbox off`.
 
 ## Layout
 

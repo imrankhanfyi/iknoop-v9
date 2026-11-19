@@ -6,7 +6,7 @@
  *   2. Base64 / UTF-8 / gzip / WebCrypto helpers (the decrypt pipeline)
  *   3. Formatting helpers (timezone-aware, null-safe: a missing value is ALWAYS "—", never 0)
  *   4. Chart primitives (sparkline, bar chart, hypnogram) — SVG + a hidden <table> twin
- *   5. Screen renderers (Today / Last night / Sleep history / Workouts / Trends)
+ *   5. Screen renderers (Sleep / Workouts + detail / Trends / Lifestyle)
  *   6. Bootstrap: fetch envelope -> show data-age banner -> unlock (remembered key or passphrase)
  */
 
@@ -135,6 +135,7 @@ function clearRememberedKey() {
     sessionStorage.removeItem(REMEMBER_KEYS.key);
     sessionStorage.removeItem(REMEMBER_KEYS.salt);
     sessionStorage.removeItem(REMEMBER_KEYS.iter);
+    sessionStorage.removeItem('noopViewerInboxMaster');
   } catch (e) { /* ignore */ }
 }
 
@@ -475,71 +476,82 @@ function statTile(label, value, colorVar) {
   return tile;
 }
 
-function renderToday(payload) {
-  const panel = $('panel-today');
-  clearNode(panel);
-  const days = payload.days || [];
-  const today = days.length ? days[days.length - 1] : null;
-  if (!today) { panel.appendChild(el('p', { class: 'empty-state' }, ['No daily data available yet.'])); return; }
+const WINDOW_DAYS = 21;
+const SYNC_GRACE_S = 30 * 60;
 
-  panel.appendChild(el('div', { class: 'section-date' }, [dayLabel(today.day)]));
-  const grid = el('div', { class: 'tile-grid' });
-  grid.appendChild(statTile('Recovery', isNum(today.recovery) ? `${Math.round(today.recovery)}%` : '—', recoveryBandVar(today.recovery)));
-  grid.appendChild(statTile('Effort (Strain)', fmtNum(today.strain, 1)));
-  grid.appendChild(statTile('Resting HR', isNum(today.restingHr) ? `${Math.round(today.restingHr)} bpm` : '—'));
-  grid.appendChild(statTile('HRV', isNum(today.avgHrv) ? `${today.avgHrv.toFixed(1)} ms` : '—'));
-  grid.appendChild(statTile('Sleep duration', fmtHM(today.totalSleepMin)));
-  grid.appendChild(statTile('Sleep performance', fmtScorePct(today.sleepPerformance)));
-  panel.appendChild(grid);
+/** "YYYY-MM-DD" of a unix ts in the payload's timezone (matches the Mac's local-day bucketing). */
+function localDayOf(ts, tz) {
+  let safe = tz || 'UTC';
+  try { new Intl.DateTimeFormat('en-US', { timeZone: safe }); } catch (e) { safe = 'UTC'; }
+  return new Intl.DateTimeFormat('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: safe })
+    .format(new Date(ts * 1000));
 }
 
-function renderLastNight(payload) {
-  const panel = $('panel-lastnight');
+/** "Data through <date time>" — dataMaxTs is the offload frontier (newest motion sample). */
+function dataThroughLine(payload) {
+  const fmt = makeFormatters(payload.tz);
+  return el('div', { class: 'data-through' }, [
+    isNum(payload.dataMaxTs) ? `Data through ${fmt.date(payload.dataMaxTs)} ${fmt.time(payload.dataMaxTs)}` : 'Data through —',
+  ]);
+}
+
+function renderSleep(payload) {
+  const panel = $('panel-sleep');
   clearNode(panel);
+  panel.appendChild(dataThroughLine(payload));
   const sleeps = payload.sleeps || [];
   const night = sleeps.length ? sleeps[sleeps.length - 1] : null;
-  if (!night) { panel.appendChild(el('p', { class: 'empty-state' }, ['No sleep recorded yet.'])); return; }
-
-  const fmt = makeFormatters(payload.tz);
-  const header = el('div', { class: 'night-header' });
-  header.appendChild(el('div', { class: 'night-times' }, [
-    el('span', { class: 'night-time' }, [fmt.time(night.effectiveStartTs)]),
-    el('span', { class: 'night-arrow' }, [' → ']),
-    el('span', { class: 'night-time' }, [fmt.time(night.endTs)]),
-  ]));
-  if (night.userEdited) header.appendChild(el('span', { class: 'chip chip-edited' }, ['edited']));
-  panel.appendChild(header);
-
-  // Two DIFFERENT durations, and they must be labelled as such. `endTs - effectiveStartTs` is time
-  // IN BED (485 min on 2026-07-27); the asleep total is the sum of the non-wake stage segments
-  // (463.32 min = 7h 43m), which is what `dailyMetric.totalSleepMin` holds and what the Today tile
-  // shows. Showing the in-bed span under a bare "Duration" label next to Today's "Sleep duration"
-  // makes the same night look like two different nights.
-  const inBedMin = isNum(night.effectiveStartTs) && isNum(night.endTs)
-    ? (night.endTs - night.effectiveStartTs) / 60 : null;
-  const stageSegs = Array.isArray(night.stages) ? night.stages : [];
-  const asleepMin = stageSegs.length
-    ? stageSegs.reduce((t, s) => t + (s.stage === 'wake' ? 0 : (s.end - s.start)), 0) / 60
-    : null;
-  const stats = el('div', { class: 'tile-grid' });
-  stats.appendChild(statTile('Asleep', fmtHM(asleepMin)));
-  stats.appendChild(statTile('Time in bed', fmtHM(inBedMin)));
-  stats.appendChild(statTile('Efficiency', fmtPct(night.efficiency)));
-  stats.appendChild(statTile('Resting HR', isNum(night.restingHr) ? `${Math.round(night.restingHr)} bpm` : '—'));
-  stats.appendChild(statTile('HRV', isNum(night.avgHrv) ? `${night.avgHrv.toFixed(1)} ms` : '—'));
-  panel.appendChild(stats);
-
-  panel.appendChild(buildHypnogram(night, payload.tz));
-}
-
-function renderHistory(payload) {
-  const panel = $('panel-history');
-  clearNode(panel);
   const days = payload.days || [];
-  if (!days.length) { panel.appendChild(el('p', { class: 'empty-state' }, ['No history yet.'])); return; }
 
+  if (!night) {
+    panel.appendChild(el('p', { class: 'empty-state' }, ['No sleep recorded yet.']));
+  } else {
+    const fmt = makeFormatters(payload.tz);
+    const header = el('div', { class: 'night-header' });
+    header.appendChild(el('div', { class: 'night-times' }, [
+      el('span', { class: 'night-time' }, [fmt.time(night.effectiveStartTs)]),
+      el('span', { class: 'night-arrow' }, [' → ']),
+      el('span', { class: 'night-time' }, [fmt.time(night.endTs)]),
+    ]));
+    if (night.userEdited) header.appendChild(el('span', { class: 'chip chip-edited' }, ['edited']));
+    // Provisional night: the offload frontier has not yet passed this night's end + 30 min, so the
+    // night may be half-offloaded (a short night is usually the frontier, not a wake).
+    if (isNum(payload.dataMaxTs) && payload.dataMaxTs < night.endTs + SYNC_GRACE_S) {
+      header.appendChild(el('span', { class: 'chip chip-syncing' }, ['still syncing']));
+    }
+    panel.appendChild(header);
+
+    // Sleep performance is the dailyMetric/metricSeries figure for the night's wake day (never
+    // derived from the session); fall back to the newest day that has one.
+    const wakeDay = localDayOf(night.endTs, payload.tz);
+    let perfDay = days.find(d => d.day === wakeDay);
+    if (!perfDay || !isNum(perfDay.sleepPerformance)) {
+      perfDay = days.slice().reverse().find(d => isNum(d.sleepPerformance)) || perfDay || null;
+    }
+    const perf = perfDay ? perfDay.sleepPerformance : null;
+    panel.appendChild(el('div', { class: 'headline-tile' }, [
+      el('div', { class: 'tile-label' }, ['Sleep performance']),
+      el('div', { class: 'headline-value' }, [fmtScorePct(perf)]),
+    ]));
+
+    const inBedMin = isNum(night.effectiveStartTs) && isNum(night.endTs)
+      ? (night.endTs - night.effectiveStartTs) / 60 : null;
+    const stageSegs = Array.isArray(night.stages) ? night.stages : [];
+    const asleepMin = stageSegs.length
+      ? stageSegs.reduce((t, s) => t + (s.stage === 'wake' ? 0 : (s.end - s.start)), 0) / 60
+      : null;
+    const stats = el('div', { class: 'tile-grid' });
+    stats.appendChild(statTile('Asleep', fmtHM(asleepMin)));
+    stats.appendChild(statTile('Time in bed', fmtHM(inBedMin)));
+    panel.appendChild(stats);
+
+    panel.appendChild(buildHypnogram(night, payload.tz));
+  }
+
+  // 21-day history
+  if (!days.length) return;
   const endDay = days[days.length - 1].day;
-  const gridDays = lastNCalendarDays(endDay, 30);
+  const gridDays = lastNCalendarDays(endDay, WINDOW_DAYS);
   const byDay = new Map(days.map(d => [d.day, d]));
   const grid = gridDays.map(day => byDay.get(day) || null);
 
@@ -553,7 +565,7 @@ function renderHistory(payload) {
     const d = grid[i];
     const row = el('div', { class: 'night-row' });
     row.appendChild(el('div', { class: 'night-row-date' }, [dayLabel(gridDays[i])]));
-    if (!d) {
+    if (!d || !isNum(d.totalSleepMin)) {
       row.appendChild(el('div', { class: 'night-row-empty' }, ['No data']));
     } else {
       row.appendChild(el('div', { class: 'night-row-detail' }, [
@@ -571,60 +583,177 @@ function renderHistory(payload) {
   panel.appendChild(list);
 }
 
+/**
+ * Heart-rate-over-time line for one workout. `trace` is integer-mean bpm per `stepS` bucket from
+ * the workout start; a null bucket breaks the line (gap), never a zero. Ships with a per-minute
+ * table twin behind the usual toggle.
+ */
+function buildHrTraceChart(trace, stepS, colorVar) {
+  const width = 320, height = 150, padL = 30, padR = 6, padT = 10, padB = 20;
+  const present = trace.filter(isNum);
+  const lo = Math.min(...present), hi = Math.max(...present);
+  const yMin = Math.floor((lo - 3) / 5) * 5, yMax = Math.ceil((hi + 3) / 5) * 5;
+  const span = (yMax - yMin) || 1;
+  const n = trace.length;
+  const xAt = i => padL + (n > 1 ? i / (n - 1) : 0) * (width - padL - padR);
+  const yAt = v => (height - padB) - ((v - yMin) / span) * (height - padB - padT);
+  const svg = svgEl('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': 'Heart rate over the workout' });
+
+  [yMin, (yMin + yMax) / 2, yMax].forEach(v => {
+    svg.appendChild(svgEl('line', { x1: padL, y1: yAt(v), x2: width - padR, y2: yAt(v), stroke: 'var(--chart-grid)', 'stroke-width': '1' }));
+    const t = svgEl('text', { x: padL - 4, y: yAt(v) + 3, 'text-anchor': 'end', 'font-size': '9', fill: 'var(--chart-axis)' });
+    t.textContent = String(Math.round(v));
+    svg.appendChild(t);
+  });
+  let d = '', open = false;
+  trace.forEach((v, i) => {
+    if (!isNum(v)) { open = false; return; }
+    d += (open ? 'L' : 'M') + xAt(i).toFixed(1) + ' ' + yAt(v).toFixed(1) + ' ';
+    open = true;
+  });
+  svg.appendChild(svgEl('path', { d: d.trim(), fill: 'none', stroke: `var(${colorVar})`, 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+  const totalMin = Math.round(n * stepS / 60);
+  [[padL, 'start', '0 min'], [width - padR, 'end', `${totalMin} min`]].forEach(([x, anchor, label]) => {
+    const t = svgEl('text', { x, y: height - 5, 'text-anchor': anchor, 'font-size': '9', fill: 'var(--chart-axis)' });
+    t.textContent = label;
+    svg.appendChild(t);
+  });
+
+  // Table twin: one row per minute (mean of that minute's present buckets).
+  const per = Math.max(1, Math.round(60 / stepS));
+  const rows = [];
+  for (let i = 0; i < n; i += per) {
+    const vals = trace.slice(i, i + per).filter(isNum);
+    rows.push([`${Math.round(i * stepS / 60)} min`,
+      vals.length ? `${Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)} bpm` : '—']);
+  }
+  const caption = el('div', { class: 'chart-caption' }, ['Heart rate (bpm) over elapsed time']);
+  return withTableToggle(svg, buildDataTable(['Elapsed', 'Avg HR'], rows), caption);
+}
+
+let currentWorkoutKey = null;   // set while a workout's detail view is open
+
 function renderWorkouts(payload) {
   const panel = $('panel-workouts');
   clearNode(panel);
-  const workouts = (payload.workouts || []).slice().sort((a, b) => (b.startTs || 0) - (a.startTs || 0));
+  currentWorkoutKey = null;
+  panel.appendChild(dataThroughLine(payload));
+  const workouts = effectiveWorkouts().sort((a, b) => (b.startTs || 0) - (a.startTs || 0));
   if (!workouts.length) { panel.appendChild(el('p', { class: 'empty-state' }, ['No workouts recorded.'])); return; }
 
   const fmt = makeFormatters(payload.tz);
   const list = el('div', { class: 'workout-list' });
-  workouts.forEach(w => {
-    const row = el('div', { class: 'workout-row' });
+  // Recent (21-day window) workouts first; the long imported history sits behind a button so the
+  // list stays short and the page light.
+  const cutoff = isNum(payload.dataMaxTs) ? payload.dataMaxTs - WINDOW_DAYS * 86400 : 0;
+  const recent = workouts.filter(w => w.endTs >= cutoff);
+  const older = workouts.filter(w => w.endTs < cutoff);
+  const addRow = w => {
+    // A <button>, so the whole row is keyboard- and screen-reader-operable.
+    const row = el('button', { class: 'workout-row', type: 'button' });
+    row.addEventListener('click', () => renderWorkoutDetail(payload, w));
     row.appendChild(el('div', { class: 'workout-top' }, [
       el('span', { class: 'workout-date' }, [fmt.date(w.startTs)]),
       el('span', { class: 'workout-time' }, [fmt.time(w.startTs)]),
     ]));
+    // `displaySport`, never the raw `sport` (the app's WorkoutSource.displaySport rule).
     const mid = el('div', { class: 'workout-mid' }, [
-      // `displaySport`, never the raw `sport`. The publisher pre-applies the app's own
-      // WorkoutSource.displaySport(): the auto-detector stores the machine token "detected", which the
-      // app deliberately shows as "Activity" ("we don't claim a sport we didn't actually classify"),
-      // and it splits WHOOP's camelCase tokens ("TraditionalStrengthTraining" -> "Traditional
-      // Strength Training"). Rendering `w.sport` puts "detected" on screen and disagrees with the app.
       el('span', { class: 'workout-sport' }, [w.displaySport || w.sport || 'Workout']),
     ]);
     if (w.hrReconciled) mid.appendChild(el('span', { class: 'chip chip-hr' }, ['HR from strap trace']));
+    if (w.edited) mid.appendChild(el('span', { class: 'chip chip-edited' }, ['edited']));
+    if (w.pendingEdit) mid.appendChild(el('span', { class: 'chip chip-pending' }, ['pending']));
     row.appendChild(mid);
-
     const durMin = isNum(w.durationS) ? w.durationS / 60 : null;
     row.appendChild(el('div', { class: 'workout-stats' }, [
       el('span', {}, [`Duration ${fmtHM(durMin)}`]),
       el('span', {}, [`Avg HR ${isNum(w.avgHr) ? Math.round(w.avgHr) + ' bpm' : '—'}`]),
       el('span', {}, [`Max HR ${isNum(w.maxHr) ? Math.round(w.maxHr) + ' bpm' : '—'}`]),
-      el('span', {}, [`Strain ${fmtNum(w.strain, 1)}`]),
     ]));
     list.appendChild(row);
-  });
+  };
+  recent.forEach(addRow);
+  if (!recent.length) list.appendChild(el('p', { class: 'empty-state' }, ['No workouts in the last 21 days.']));
+  if (older.length) {
+    const more = el('button', { class: 'table-toggle', type: 'button' }, [`Show ${older.length} older workouts`]);
+    more.addEventListener('click', () => { older.forEach(addRow); more.remove(); });
+    list.appendChild(more);
+  }
   panel.appendChild(list);
 }
 
+function renderWorkoutDetail(payload, w, editing) {
+  const panel = $('panel-workouts');
+  clearNode(panel);
+  currentWorkoutKey = origKeyOf(w);
+  const fmt = makeFormatters(payload.tz);
+  const back = el('button', { class: 'back-btn', type: 'button' }, ['‹ Workouts']);
+  back.addEventListener('click', () => { renderWorkouts(payload); window.scrollTo(0, 0); });
+  panel.appendChild(back);
+  panel.appendChild(dataThroughLine(payload));
+
+  const title = el('h2', { class: 'detail-title', tabindex: '-1' }, [w.displaySport || w.sport || 'Workout']);
+  panel.appendChild(title);
+  if (w.edited || w.pendingEdit) {
+    const chips = el('div', { class: 'detail-chips' });
+    if (w.edited) chips.appendChild(el('span', { class: 'chip chip-edited' }, ['edited']));
+    if (w.pendingEdit) chips.appendChild(el('span', { class: 'chip chip-pending' }, ['pending']));
+    panel.appendChild(chips);
+  }
+  panel.appendChild(el('div', { class: 'section-date' }, [`${fmt.date(w.startTs)} · ${fmt.time(w.startTs)} → ${fmt.time(w.endTs)}`]));
+
+  const durMin = isNum(w.durationS) ? w.durationS / 60 : null;
+  const grid = el('div', { class: 'tile-grid' });
+  grid.appendChild(statTile('Duration', fmtHM(durMin)));
+  grid.appendChild(statTile('Energy', isNum(w.energyKcal) ? `${Math.round(w.energyKcal)} kcal` : '—'));
+  grid.appendChild(statTile('Avg HR', isNum(w.avgHr) ? `${Math.round(w.avgHr)} bpm` : '—'));
+  grid.appendChild(statTile('Max HR', isNum(w.maxHr) ? `${Math.round(w.maxHr)} bpm` : '—'));
+  panel.appendChild(grid);
+
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('h3', { class: 'card-title' }, ['Heart rate']));
+  const trace = Array.isArray(w.hrTrace) ? w.hrTrace : null;
+  if (trace && trace.some(isNum)) {
+    card.appendChild(buildHrTraceChart(trace, 5, '--status-critical'));
+  } else {
+    card.appendChild(el('p', { class: 'empty-state' }, [w.spanPending
+      ? 'Heart rate and energy for the new times update after the Mac’s next publish.'
+      : 'No heart-rate trace for this workout (only the last 21 days carry one).']));
+  }
+  panel.appendChild(card);
+
+  if (inboxKeys) {
+    if (editing) {
+      panel.appendChild(buildWorkoutEditor(payload, w, changed => {
+        if (!changed) { renderWorkoutDetail(payload, w, false); return; }
+        const fresh = effectiveWorkouts().find(x => origKeyOf(x) === origKeyOf(w));
+        if (fresh) renderWorkoutDetail(payload, fresh, false); else renderWorkouts(payload);
+      }));
+    } else {
+      const edit = el('button', { class: 'btn-quiet', type: 'button', id: 'editWorkoutBtn' }, ['Edit workout']);
+      edit.addEventListener('click', () => renderWorkoutDetail(payload, w, true));
+      panel.appendChild(edit);
+    }
+  }
+  window.scrollTo(0, 0);
+  title.focus();
+}
+
 const TREND_METRICS = [
-  { key: 'recovery', label: 'Recovery', colorVar: '--recovery-100', formatter: v => `${Math.round(v)}%` },
-  { key: 'strain', label: 'Strain', colorVar: '--strain-100', formatter: v => fmtNum(v, 1) },
-  { key: 'restingHr', label: 'Resting HR', colorVar: '--metric-restinghr', formatter: v => `${Math.round(v)} bpm` },
   { key: 'avgHrv', label: 'HRV', colorVar: '--metric-cyan', formatter: v => `${v.toFixed(1)} ms` },
-  { key: 'totalSleepMin', label: 'Sleep duration', colorVar: '--rest-color', formatter: fmtHM },
-  { key: 'sleepPerformance', label: 'Sleep performance', colorVar: '--accent', formatter: v => `${Math.round(v)}%` },
+  { key: 'restingHr', label: 'Resting HR', colorVar: '--metric-restinghr', formatter: v => `${Math.round(v)} bpm` },
+  { key: 'meanHr', label: 'Whole-day mean HR', colorVar: '--rest-color', formatter: v => `${Math.round(v)} bpm` },
 ];
 
 function renderTrends(payload) {
   const panel = $('panel-trends');
   clearNode(panel);
+  panel.appendChild(dataThroughLine(payload));
   const days = payload.days || [];
   if (!days.length) { panel.appendChild(el('p', { class: 'empty-state' }, ['No trend data yet.'])); return; }
 
   const endDay = days[days.length - 1].day;
-  const gridDays = lastNCalendarDays(endDay, 30);
+  const gridDays = lastNCalendarDays(endDay, WINDOW_DAYS);
   const byDay = new Map(days.map(d => [d.day, d]));
 
   TREND_METRICS.forEach(m => {
@@ -648,6 +777,469 @@ function renderTrends(payload) {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. Write-back: inbox keys, sealed entry queue, day/time helpers
+//
+// Contract shared byte for byte with the Mac (Sources/noop-publish/Crypto.swift, InboxCrypto) and the
+// receiver (receiver/noop_inbox.py):
+//   master    = PBKDF2-HMAC-SHA256(utf8(passphrase), salt "noop-phone-inbox-v1", 600000, 32 bytes)
+//   authToken = hex(HMAC-SHA256(master, "inbox-auth"))
+//   entryKey  = HMAC-SHA256(master, "entry-enc")                    (AES-256-GCM)
+//   entry     = AES-GCM(entryKey, random 12-byte nonce, AAD "noop-inbox-v1:" + id); body = ct || tag
+// Every tap is sealed immediately and ONLY the sealed envelope is queued in localStorage, so no
+// plaintext answer or workout edit ever sits in browser storage.
+// ---------------------------------------------------------------------------
+
+const INBOX_SALT = 'noop-phone-inbox-v1';
+const INBOX_ITERATIONS = 600000;
+const INBOX_MASTER_KEY = 'noopViewerInboxMaster';
+const INBOX_QUEUE_KEY = 'noopInboxQueue_v1';
+
+function hexFromBytes(bytes) {
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function deriveInboxMaster(passphrase) {
+  const base = await crypto.subtle.importKey('raw', utf8(passphrase), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: utf8(INBOX_SALT), iterations: INBOX_ITERATIONS, hash: 'SHA-256' }, base, 256));
+}
+
+async function inboxKeysFromMaster(master) {
+  const hk = await crypto.subtle.importKey('raw', master, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const mac = async label => new Uint8Array(await crypto.subtle.sign('HMAC', hk, utf8(label)));
+  const token = hexFromBytes(await mac('inbox-auth'));
+  const entryKey = await crypto.subtle.importKey('raw', await mac('entry-enc'), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  return { token, entryKey };
+}
+
+function entryAad(id) { return utf8('noop-inbox-v1:' + id); }
+
+async function sealEntry(entry, keys) {
+  const id = crypto.randomUUID();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: entryAad(id), tagLength: 128 }, keys.entryKey, utf8(JSON.stringify(entry))));
+  return { id, nonceB64: b64FromBytes(iv), ciphertextB64: b64FromBytes(ct) };
+}
+
+async function openEntry(env, keys) {
+  const pt = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: bytesFromB64(env.nonceB64), additionalData: entryAad(env.id), tagLength: 128 },
+    keys.entryKey, bytesFromB64(env.ciphertextB64));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+
+function saveInboxMaster(master) {
+  try { sessionStorage.setItem(INBOX_MASTER_KEY, b64FromBytes(master)); } catch (e) { /* ignore */ }
+}
+function loadInboxMaster() {
+  try { const v = sessionStorage.getItem(INBOX_MASTER_KEY); return v ? bytesFromB64(v) : null; } catch (e) { return null; }
+}
+
+function loadQueue() {
+  try { const a = JSON.parse(localStorage.getItem(INBOX_QUEUE_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function saveQueue(q) {
+  try { localStorage.setItem(INBOX_QUEUE_KEY, JSON.stringify(q)); } catch (e) { /* storage unavailable */ }
+}
+
+// Unlocked state. `pending` = decoded view of the queued envelopes that the Mac has not yet confirmed
+// (their id is not in payload.ingestedEntryIds): [{ id, state: 'unsent'|'sent', entry }].
+let inboxKeys = null;
+let pending = [];
+let flushing = false;
+let lastEnteredAt = 0;
+let inboxNote = '';
+
+function nextEnteredAt() {
+  // Whole seconds, strictly increasing: Yes-then-clear inside one second must not tie.
+  lastEnteredAt = Math.max(Math.floor(Date.now() / 1000), lastEnteredAt + 1);
+  return lastEnteredAt;
+}
+
+/** After unlock: drop everything the Mac has ingested, decrypt the rest for display, then try to send. */
+async function initInbox(keys, ingestedIds) {
+  inboxKeys = keys;
+  const ingested = new Set(ingestedIds || []);
+  const queue = loadQueue().filter(q => q && q.id && !ingested.has(q.id));
+  const kept = [];
+  pending = [];
+  for (const q of queue) {
+    try {
+      const entry = await openEntry(q, keys);
+      kept.push(q);
+      pending.push({ id: q.id, state: q.state === 'sent' ? 'sent' : 'unsent', entry });
+      if (isNum(entry.enteredAt)) lastEnteredAt = Math.max(lastEnteredAt, entry.enteredAt);
+    } catch (e) { /* sealed under another passphrase: the Mac would reject it too — drop */ }
+  }
+  saveQueue(kept);
+  flushQueue();
+}
+
+async function enqueueEntry(entry) {
+  entry.enteredAt = nextEnteredAt();
+  const env = await sealEntry(entry, inboxKeys);
+  const queue = loadQueue();
+  queue.push({ id: env.id, nonceB64: env.nonceB64, ciphertextB64: env.ciphertextB64, state: 'unsent', createdS: entry.enteredAt });
+  saveQueue(queue);
+  pending.push({ id: env.id, state: 'unsent', entry });
+  refreshInboxViews();
+  flushQueue();
+}
+
+function setQueueState(id, state) {
+  const queue = loadQueue();
+  const q = queue.find(x => x.id === id);
+  if (q) { q.state = state; saveQueue(queue); }
+  const p = pending.find(x => x.id === id);
+  if (p) p.state = state;
+}
+
+function dropQueued(id) {
+  saveQueue(loadQueue().filter(x => x.id !== id));
+  pending = pending.filter(x => x.id !== id);
+}
+
+/** POST every unsent entry to the same-origin receiver. "sent" entries are NEVER re-posted: the Mac
+ * deletes them from the server once ingested, and a re-POST would recreate the file. */
+async function flushQueue() {
+  if (flushing || !inboxKeys) return;
+  flushing = true;
+  try {
+    for (const q of loadQueue().filter(x => x.state !== 'sent')) {
+      let resp;
+      try {
+        resp = await fetch('/inbox', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + inboxKeys.token },
+          body: JSON.stringify({ v: 1, id: q.id, nonceB64: q.nonceB64, ciphertextB64: q.ciphertextB64 }),
+        });
+      } catch (e) { inboxNote = 'Offline — will send when connected.'; break; }
+      if (resp.status === 200 || resp.status === 201) { setQueueState(q.id, 'sent'); inboxNote = ''; }
+      else if (resp.status === 400 || resp.status === 413) { dropQueued(q.id); inboxNote = 'An entry was refused and discarded.'; }
+      else if (resp.status === 401) { inboxNote = 'The server did not accept this passphrase.'; break; }
+      else { inboxNote = 'Server busy — will retry.'; break; }
+    }
+  } finally {
+    flushing = false;
+    refreshInboxViews();
+  }
+}
+
+window.addEventListener('online', () => { flushQueue(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') flushQueue(); });
+
+function refreshInboxViews() {
+  if (!payload) return;
+  renderLifestyle(payload);
+  // Keep the workout view in step (pending chips), unless the user is mid-edit in the detail view.
+  if (!currentWorkoutKey) renderWorkouts(payload);
+}
+
+// --- day helpers (the payload's timezone, never the device's) --------------
+
+function addDays(dayStr, n) {
+  const p = dayStr.split('-').map(Number);
+  const d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + n));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+const LONG_DAY_FMT = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+function longDayLabel(dayStr) {
+  const p = dayStr.split('-').map(Number);
+  return LONG_DAY_FMT.format(new Date(Date.UTC(p[0], p[1] - 1, p[2])));
+}
+
+function safeTz(tz) {
+  let t = tz || 'UTC';
+  try { new Intl.DateTimeFormat('en-US', { timeZone: t }); } catch (e) { t = 'UTC'; }
+  return t;
+}
+function tzFields(ts, tz) {
+  const f = new Intl.DateTimeFormat('en-CA', { timeZone: safeTz(tz), hourCycle: 'h23', year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const o = {};
+  f.formatToParts(new Date(ts * 1000)).forEach(p => { if (p.type !== 'literal') o[p.type] = Number(p.value); });
+  return o;
+}
+function localAsUtc(ts, tz) {
+  const o = tzFields(ts, tz);
+  return Date.UTC(o.year, o.month - 1, o.day, o.hour, o.minute, o.second) / 1000;
+}
+/** unix ts -> "YYYY-MM-DDTHH:mm" in `tz` (a <input type=datetime-local> value). */
+function tsToInput(ts, tz) {
+  const o = tzFields(ts, tz);
+  const z = n => String(n).padStart(2, '0');
+  return `${o.year}-${z(o.month)}-${z(o.day)}T${z(o.hour)}:${z(o.minute)}`;
+}
+/** "YYYY-MM-DDTHH:mm" read as wall-clock time in `tz` -> unix ts (null if unparseable). */
+function inputToTs(str, tz) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(str || '');
+  if (!m) return null;
+  const asUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 1000;
+  let ts = asUtc;
+  for (let i = 0; i < 3; i++) ts = asUtc - (localAsUtc(ts, tz) - ts);
+  return ts;
+}
+
+// --- merged views: payload + unconfirmed local entries ----------------------
+
+/** {day:{item:bool}} from the payload, overlaid with unconfirmed local check-ins in enteredAt order. */
+function effectiveAnswers() {
+  const out = {};
+  const base = (payload.lifestyle && payload.lifestyle.answers) || {};
+  Object.keys(base).forEach(d => { out[d] = Object.assign({}, base[d]); });
+  pending.filter(p => p.entry.kind === 'checkin').sort((a, b) => a.entry.enteredAt - b.entry.enteredAt).forEach(p => {
+    const e = p.entry;
+    out[e.day] = out[e.day] || {};
+    if (e.value === true || e.value === false) out[e.day][e.item] = e.value; else delete out[e.day][e.item];
+  });
+  return out;
+}
+function pendingItem(day, item) {
+  return pending.some(p => p.entry.kind === 'checkin' && p.entry.day === day && p.entry.item === item);
+}
+
+function origKeyOf(w) {
+  const o = w.orig || { startTs: w.startTs, endTs: w.endTs, sport: w.sport };
+  return `${o.startTs}|${o.endTs}|${o.sport}`;
+}
+function displaySportOf(sport) {
+  if (sport === 'detected') return 'Activity';
+  if (!sport || sport.indexOf(' ') >= 0) return sport || 'Workout';
+  return sport.replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+
+/** Workouts with unconfirmed local edits applied (newest entry per original span wins). */
+function effectiveWorkouts() {
+  const latest = new Map();
+  pending.filter(p => p.entry.kind === 'workoutOverride').sort((a, b) => a.entry.enteredAt - b.entry.enteredAt)
+    .forEach(p => { latest.set(`${p.entry.orig.startTs}|${p.entry.orig.endTs}|${p.entry.orig.sport}`, p.entry); });
+  const out = [];
+  (payload.workouts || []).forEach(w => {
+    const ov = latest.get(origKeyOf(w));
+    if (!ov) { out.push(w); return; }
+    if (ov.deleted) return;
+    const c = Object.assign({}, w, { pendingEdit: true });
+    if (!c.orig) c.orig = { startTs: w.startTs, endTs: w.endTs, sport: w.sport };
+    if (ov.sport) { c.sport = ov.sport; c.displaySport = displaySportOf(ov.sport); }
+    if (isNum(ov.startTs) && isNum(ov.endTs) && (ov.startTs !== w.startTs || ov.endTs !== w.endTs)) {
+      c.startTs = ov.startTs; c.endTs = ov.endTs; c.durationS = ov.endTs - ov.startTs;
+      // Stats and the trace describe the OLD span; the Mac recomputes them from the strap's samples.
+      c.avgHr = null; c.maxHr = null; c.energyKcal = null; c.hrTrace = null; c.spanPending = true;
+    }
+    out.push(c);
+  });
+  return out;
+}
+
+let lifestyleMode = 'yesterday';   // 'yesterday' (default) | 'tonight'
+
+function inboxUnavailableCard() {
+  const c = el('div', { class: 'card' });
+  c.appendChild(el('p', { class: 'empty-state' }, ['Answers can’t be filed from this session — it was unlocked with a remembered key that predates filing. Sign in again with your passphrase.']));
+  const b = el('button', { class: 'table-toggle', type: 'button' }, ['Sign in again']);
+  b.addEventListener('click', () => { clearRememberedKey(); location.reload(); });
+  c.appendChild(b);
+  return c;
+}
+
+function renderLifestyle(payload) {
+  const panel = $('panel-lifestyle');
+  clearNode(panel);
+  panel.appendChild(dataThroughLine(payload));
+  const life = payload.lifestyle || { items: [], answers: {} };
+
+  // "Yesterday" files under TODAY's morning (about the night + day before it); "Tonight" is about today
+  // and files under TOMORROW's morning — the same attribution NOOP's own journal uses.
+  const today = localDayOf(Date.now() / 1000, payload.tz);
+  const filed = lifestyleMode === 'yesterday' ? today : addDays(today, 1);
+  const about = addDays(filed, -1);
+
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('h3', { class: 'card-title' }, ['Checklist']));
+  const seg = el('div', { class: 'seg seg-wide', role: 'group', 'aria-label': 'Which day' });
+  [['yesterday', 'Yesterday'], ['tonight', 'Tonight']].forEach(([mode, label]) => {
+    const b = el('button', { class: 'seg-btn', type: 'button', 'aria-pressed': lifestyleMode === mode ? 'true' : 'false', 'data-mode': mode }, [label]);
+    b.addEventListener('click', () => { lifestyleMode = mode; renderLifestyle(payload); });
+    seg.appendChild(b);
+  });
+  card.appendChild(seg);
+  card.appendChild(el('div', { class: 'checklist-day', id: 'checklistDay' }, [`About ${longDayLabel(about)} · filed under ${longDayLabel(filed)}`]));
+
+  const nPending = pending.length;
+  if (nPending) {
+    const unsent = pending.filter(p => p.state === 'unsent').length;
+    card.appendChild(el('div', { class: 'checklist-status', id: 'pendingSummary' }, [
+      el('span', { class: 'chip chip-pending' }, [`${nPending} pending`]),
+      ` ${unsent ? unsent + ' waiting to send' : 'sent — waiting for the Mac'}`,
+    ]));
+  }
+  if (inboxNote) card.appendChild(el('div', { class: 'checklist-note' }, [inboxNote]));
+
+  if (!inboxKeys) {
+    panel.appendChild(card);
+    panel.appendChild(inboxUnavailableCard());
+    renderEffectsPlaceholder(panel);
+    return;
+  }
+
+  const items = life.items || [];
+  if (!items.length) {
+    card.appendChild(el('p', { class: 'empty-state' }, ['No checklist items are set up on the Mac yet.']));
+  }
+  const answers = effectiveAnswers();
+  const answered = (answers[filed] || {});
+  const list = el('div', { class: 'checklist' });
+  items.forEach(it => {
+    const cur = answered[it.id];
+    const row = el('div', { class: 'check-row', 'data-item': it.id });
+    const label = el('div', { class: 'check-label' }, [it.label]);
+    if (pendingItem(filed, it.id)) label.appendChild(el('span', { class: 'chip chip-pending', 'data-pending': it.id }, ['pending']));
+    row.appendChild(label);
+    const ctl = el('div', { class: 'seg', role: 'group', 'aria-label': it.label });
+    const mk = (text, val) => {
+      const pressed = cur === val;
+      const b = el('button', { class: 'seg-btn', type: 'button', 'aria-pressed': pressed ? 'true' : 'false',
+        'data-answer': val === true ? 'yes' : 'no' }, [text]);
+      // Tapping the active answer again clears it (value: null).
+      b.addEventListener('click', () => enqueueEntry({ v: 1, kind: 'checkin', day: filed, item: it.id, value: pressed ? null : val }));
+      return b;
+    };
+    ctl.appendChild(mk('Yes', true));
+    ctl.appendChild(mk('No', false));
+    if (cur === true || cur === false) {
+      const clr = el('button', { class: 'seg-btn seg-clear', type: 'button', 'data-answer': 'clear', 'aria-label': `Clear ${it.label}` }, ['Clear']);
+      clr.addEventListener('click', () => enqueueEntry({ v: 1, kind: 'checkin', day: filed, item: it.id, value: null }));
+      ctl.appendChild(clr);
+    }
+    row.appendChild(ctl);
+    list.appendChild(row);
+  });
+  card.appendChild(list);
+  card.appendChild(el('p', { class: 'checklist-hint' }, ['Unanswered stays blank — it is never counted as “no”.']));
+  panel.appendChild(card);
+  renderEffects(panel, payload);
+}
+
+// Effects: NOOP's own EffectRanker math (computed on the Mac over ALL history, answered days only).
+// Wording is deliberately "lined up with", never "caused": ~30 logged days × 17 items × 3 outcomes × 3
+// lags is ~150 comparisons, so a handful clear p < 0.05 by chance. Effect size + day counts lead.
+function effectSizeWord(d) {
+  const a = Math.abs(d);
+  return a < 0.2 ? 'negligible' : a < 0.5 ? 'small' : a < 0.8 ? 'medium' : 'large';
+}
+function lagWord(lag) {
+  return lag === 0 ? 'that night' : lag === 1 ? '1 night later' : `${lag} nights later`;
+}
+function renderEffects(panel, payload) {
+  const card = el('div', { class: 'card' });
+  card.appendChild(el('h3', { class: 'card-title' }, ['Effects']));
+  const L = (payload && payload.lifestyle) || {};
+  const effects = Array.isArray(L.effects) ? L.effects : [];
+  const items = Array.isArray(L.items) ? L.items : [];
+  if (!effects.length) {
+    card.appendChild(el('p', { class: 'empty-state' }, ['No effects yet — they appear once an item has at least 5 “yes” and 5 “no” days.']));
+    panel.appendChild(card);
+    return;
+  }
+  card.appendChild(el('p', { class: 'checklist-hint' }, [
+    'Averages on days you answered yes vs no, using all your history. These show what lined up, not what caused it — with this many comparisons a few will look real by chance. Trust large effects with many days.'
+  ]));
+  const units = { sleepPerformance: '%', hrv: ' ms', restingHr: ' bpm' };
+  const thin = [];
+  items.forEach((it) => {
+    const rows = effects.filter((e) => e.item === it.id);
+    const ok = rows.filter((e) => e.status === 'ok').sort((a, b) => Math.abs(b.cohensD) - Math.abs(a.cohensD));
+    if (!ok.length) {
+      const best = rows.reduce((m, e) => (Math.min(e.nWith || 0, e.nWithout || 0) > Math.min(m.nWith || 0, m.nWithout || 0) ? e : m), rows[0] || {});
+      thin.push(`${it.label} (${best.nWith || 0} yes / ${best.nWithout || 0} no)`);
+      return;
+    }
+    const group = el('div', { class: 'effect-item' });
+    group.appendChild(el('div', { class: 'effect-item-label' }, [it.label]));
+    ok.forEach((e) => {
+      const u = units[e.outcome] || '';
+      const sign = e.delta > 0 ? '+' : e.delta < 0 ? '−' : '±';
+      const row = el('div', { class: 'effect-row' }, [
+        el('span', { class: 'effect-outcome' }, [`${e.outcomeLabel}, ${lagWord(e.lag)}`]),
+        el('span', { class: 'effect-value' }, [`${e.meanWith}${u} vs ${e.meanWithout}${u} (${sign}${Math.abs(e.delta)})`]),
+      ]);
+      group.appendChild(row);
+      group.appendChild(el('div', { class: 'effect-meta' }, [
+        `${effectSizeWord(e.cohensD)} effect · ${e.nWith} yes vs ${e.nWithout} no days`
+      ]));
+    });
+    card.appendChild(group);
+  });
+  if (thin.length) {
+    card.appendChild(el('p', { class: 'checklist-hint' }, [`Not enough answered days yet (needs 5 yes and 5 no): ${thin.join(', ')}.`]));
+  }
+  panel.appendChild(card);
+}
+
+// --- workout edit -------------------------------------------------------------
+
+const SPORT_CHOICES = ['Running', 'Cycling', 'Walking', 'Hiking', 'Swimming', 'Rowing', 'Yoga', 'CrossFit', 'CrossTraining',
+  'FunctionalStrengthTraining', 'TraditionalStrengthTraining', 'HighIntensityIntervalTraining', 'Other'];
+
+function buildWorkoutEditor(payload, w, onDone) {
+  const tz = payload.tz;
+  const orig = w.orig || { startTs: w.startTs, endTs: w.endTs, sport: w.sport };
+  const card = el('div', { class: 'card edit-card', id: 'workoutEditor' });
+  card.appendChild(el('h3', { class: 'card-title' }, ['Edit workout']));
+
+  const sportSel = el('select', { id: 'editSport', class: 'field' });
+  const choices = SPORT_CHOICES.slice();
+  [w.sport, orig.sport].forEach(s => { if (s && choices.indexOf(s) < 0) choices.unshift(s); });
+  choices.forEach(s => {
+    const o = el('option', { value: s }, [displaySportOf(s)]);
+    if (s === w.sport) o.selected = true;
+    sportSel.appendChild(o);
+  });
+  const startIn = el('input', { id: 'editStart', class: 'field', type: 'datetime-local', value: tsToInput(w.startTs, tz) });
+  const endIn = el('input', { id: 'editEnd', class: 'field', type: 'datetime-local', value: tsToInput(w.endTs, tz) });
+  const lab = (text, node) => el('label', { class: 'field-row' }, [el('span', { class: 'field-label' }, [text]), node]);
+  card.appendChild(lab('Sport', sportSel));
+  card.appendChild(lab(`Start (${safeTz(tz)})`, startIn));
+  card.appendChild(lab('End', endIn));
+  const err = el('p', { class: 'gate-error', id: 'editError', role: 'alert' });
+  card.appendChild(err);
+
+  const row = el('div', { class: 'edit-actions' });
+  const save = el('button', { class: 'btn-primary', type: 'button', id: 'editSave' }, ['Save']);
+  const cancel = el('button', { class: 'btn-quiet', type: 'button' }, ['Cancel']);
+  const del = el('button', { class: 'btn-danger', type: 'button', id: 'editDelete' }, ['Delete workout']);
+  let armed = false;
+  cancel.addEventListener('click', () => onDone(false));
+  del.addEventListener('click', async () => {
+    if (!armed) { armed = true; del.textContent = 'Tap again to delete'; return; }
+    await enqueueEntry({ v: 1, kind: 'workoutOverride', orig, deleted: true });
+    onDone(true);
+  });
+  save.addEventListener('click', async () => {
+    err.textContent = '';
+    // Unchanged fields keep their exact timestamps (the inputs only have minute precision).
+    const ns = startIn.value === tsToInput(w.startTs, tz) ? w.startTs : inputToTs(startIn.value, tz);
+    const ne = endIn.value === tsToInput(w.endTs, tz) ? w.endTs : inputToTs(endIn.value, tz);
+    if (!isNum(ns) || !isNum(ne)) { err.textContent = 'Enter a start and an end time.'; return; }
+    if (ne <= ns) { err.textContent = 'The end must be after the start.'; return; }
+    if (ne - ns > 24 * 3600) { err.textContent = 'A workout can’t be longer than 24 hours.'; return; }
+    // The override REPLACES any earlier one for this workout, so it lists every field that differs from
+    // the ORIGINAL (not from what is currently shown) — otherwise a second edit would drop the first.
+    const entry = { v: 1, kind: 'workoutOverride', orig };
+    if (sportSel.value !== orig.sport) entry.sport = sportSel.value;
+    if (ns !== orig.startTs || ne !== orig.endTs) { entry.startTs = ns; entry.endTs = ne; }
+    save.disabled = true;
+    await enqueueEntry(entry);
+    onDone(true);
+  });
+  row.appendChild(save); row.appendChild(cancel); row.appendChild(del);
+  card.appendChild(row);
+  return card;
+}
+
+// ---------------------------------------------------------------------------
 // 6. Bootstrap
 // ---------------------------------------------------------------------------
 
@@ -666,13 +1258,13 @@ function renderAgeInfo(env) {
   const fmt = makeFormatters(env.tz);
   clearNode(ageLine);
   ageLine.appendChild(document.createTextNode(
-    `Data as of ${fmt.date(env.dataMaxTs)} ${fmt.time(env.dataMaxTs)} · generated ${fmt.time(env.generatedAt)}`
+    `Data through ${fmt.date(env.dataMaxTs)} ${fmt.time(env.dataMaxTs)} · generated ${fmt.time(env.generatedAt)}`
   ));
   const ageHours = (Date.now() / 1000 - env.dataMaxTs) / 3600;
   clearNode(banner);
   if (isNum(ageHours) && ageHours > 30) {
     banner.appendChild(document.createTextNode(
-      `Data is ${Math.round(ageHours)} hours old — the Mac hasn't published since ${fmt.date(env.dataMaxTs)} ${fmt.time(env.dataMaxTs)}.`
+      `Data only reaches ${fmt.date(env.dataMaxTs)} ${fmt.time(env.dataMaxTs)} (${Math.round(ageHours)} hours ago) — NOOP on the Mac is still catching up from the strap, or isn't running.`
     ));
     banner.hidden = false;
   } else {
@@ -680,15 +1272,18 @@ function renderAgeInfo(env) {
   }
 }
 
-function showApp() {
+async function showApp(master) {
+  if (master) {
+    try { await initInbox(await inboxKeysFromMaster(master), payload.ingestedEntryIds); }
+    catch (e) { console.error('NOOP viewer: inbox init failed', e); inboxKeys = null; }
+  }
   $('gate').hidden = true;
   const app = $('app');
   app.hidden = false;
-  renderToday(payload);
-  renderLastNight(payload);
-  renderHistory(payload);
+  renderSleep(payload);
   renderWorkouts(payload);
   renderTrends(payload);
+  renderLifestyle(payload);
   wireTabs();
 }
 
@@ -727,17 +1322,22 @@ function wireGateForm() {
     if (!passphrase) return;
     submitBtn.disabled = true;
     try {
-      const key = await deriveKey(passphrase, envelope.kdf.saltB64, envelope.kdf.iterations);
+      // Payload key and inbox master are independent PBKDF2 runs (different salts): derive in parallel.
+      const [key, master] = await Promise.all([
+        deriveKey(passphrase, envelope.kdf.saltB64, envelope.kdf.iterations),
+        deriveInboxMaster(passphrase),
+      ]);
       payload = await decryptEnvelope(envelope, key);
       if (remember.checked) {
         const raw = await crypto.subtle.exportKey('raw', key);
         saveRememberedKey(b64FromBytes(new Uint8Array(raw)), envelope.kdf.saltB64, envelope.kdf.iterations);
+        saveInboxMaster(master);
         wireForgetButton();
       } else {
         clearRememberedKey();
       }
       input.value = '';
-      showApp();
+      await showApp(master);
     } catch (e) {
       // Never leak the raw error object into the DOM — a stack trace can hint at internals to
       // anyone shoulder-surfing. Log it for local debugging only.
@@ -785,7 +1385,7 @@ async function init() {
     try {
       const key = await crypto.subtle.importKey('raw', bytesFromB64(remembered.keyB64), { name: 'AES-GCM' }, true, ['decrypt']);
       payload = await decryptEnvelope(envelope, key);
-      showApp();
+      await showApp(loadInboxMaster());
       wireForgetButton();
       return;
     } catch (e) {

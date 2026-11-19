@@ -48,6 +48,8 @@ struct RawWorkout {
     var strain: Double?
     var distanceM: Double?
     var zonesJSON: String?
+    /// Set when a phone-side override was applied: the ORIGINAL span/sport the phone must echo on re-edit.
+    var original: (startTs: Int, endTs: Int, sport: String)? = nil
 
     var cls: WorkoutClass { WorkoutClass.classify(source) }
 }

@@ -58,24 +58,25 @@ protocol probes, or AI Coach (the latter conflicts with this fork's permanent ze
 The tracker-recovery plist under `workspace/recovery/` remains deliberately untracked because it
 contains personal health/medication tracker data.
 
-## NEXT PICKUP — `workspace/noop-phone/` (deployed and scheduled)
+## NEXT PICKUP — `workspace/noop-phone/` v2 (in progress 2026-11-18)
 
-Read **`workspace/noop-phone/README.md`** first; it is the full operational handoff.
+Spec: `docs/superpowers/specs/2026-11-18-noop-phone-v2-design.md`. Handoff: `workspace/noop-phone/README.md`.
+Decision: the phone viewer replaces the desktop app for Imran's daily use (sleep, workouts, HRV/RHR trends,
+lifestyle check-ins + effects); the Mac is an unattended collector. NOOP.app was added to login items
+2026-11-18 (it had been off 11-11 → 11-18 because it never restarted after reboots).
 
-**Deployed and verified:** `noop-publish` reads the live NOOP store read-only and writes an encrypted
-`noop-data.json`; the standalone viewer decrypts that file in the iPhone browser. The root-owned site
-is private to the tailnet at `https://freckleclaw.tail4d0805.ts.net:8444/`. It is deliberately not a
-Hermes dashboard plugin: Hermes can write its own tree, whereas the viewer files are root-owned.
-
-**Scheduled:** `~/Library/LaunchAgents/com.noopapp.noop-phone-publish.plist` runs the reviewed
-`workspace/noop-phone/scripts/publish-daily.sh` at 08:15 local Pacific time, or when the Mac next
-wakes after a missed time. It does not wake the Mac and has no retry/KeepAlive loop. The wrapper
-transfers only the encrypted envelope, performs a remote atomic replacement, and preserves the last
-known-good payload if any stage fails. Local logs are in `~/Library/Logs/NOOP/` and exclude health
-summaries and passphrases.
-
-**Next observation only:** confirm the next natural 08:15-or-wake execution in the LaunchAgent logs.
-The real iPhone viewer has already loaded and decrypted a payload successfully.
+- **Done:** Phase 0 (15-min frontier-triggered publish, gravity-keyed guard, safe failure reasons), Phase 1
+  (4-tab viewer; v2 files + payload deployed to `/srv/noop-health` 2026-11-18, v1 backed up under
+  `/root/noop-backups/viewer-v1-*`), Phase 2 server half (`receiver/`, live at `:8444/inbox`).
+- **LaunchAgent re-enabled 2026-11-18 17:57** (was paused during Phase 2); wrapper now passes
+  `--max-age-hours 240`. First real v2 publish: `bytes=69731 frontier=1794446844`.
+- **Phases 2 and 3 deployed 2026-11-18** (checklist + workout edits via the inbox; Effects via vendored
+  `EffectRanker` + answered-days adapter). **Next:** Imran checks it on the real iPhone. Lifestyle items (17) live in `~/Library/Application Support/noop-phone/items.json` —
+  never in git (medication names).
+- **Open — offload slowing:** on 2026-11-18 the gravity frontier advanced ~10× real time at 17:00, ~4–6× at
+  17:20, ~2.7× by 17:57 (7-day backlog). Unexplained; if it holds, a closed-lid night takes far longer than
+  the ~1 h Imran accepted. Measure a normal morning; if still slow, instrument chunk-received→ack timing
+  in `Strand/Collect/Backfiller.swift` before changing anything. The store has no `dailyMetric` rows between 2026-08-26 and 2026-11-04.
 
 Nothing here is a NOOP.app change, so no Android twin and no migration is involved.
 

@@ -128,7 +128,10 @@ extension Optional where Wrapped == SQLValue {
 
 struct PublishError: Error, CustomStringConvertible {
     let description: String
-    init(_ m: String) { description = m }
+    /// A short category that is SAFE to log unattended: never a health value, only a kind and
+    /// non-biometric facts (ages, counts). The wrapper logs this line and nothing else from stderr.
+    let reason: String
+    init(_ m: String, reason: String = "error") { description = m; self.reason = reason }
 }
 
 /// SQL string literal quoting (single quotes doubled). Only used for internal constants — no user

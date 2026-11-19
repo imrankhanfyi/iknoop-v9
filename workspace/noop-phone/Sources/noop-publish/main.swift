@@ -5,8 +5,17 @@ import Foundation
 // Usage:
 //   noop-publish --out <dir> [--db <path>] [--passphrase-from keychain|stdin|env]
 //                [--max-age-hours N] [--min-hr-rows N] [--plaintext-out <path>] [--self-test]
+//                [--skip-unless-after <unix>] [--inbox-dir <dir>] [--calorie-check]
 //
-// Writes <dir>/noop-data.json (the envelope). Read-only with respect to the NOOP store.
+// Writes <dir>/noop-data.json (the envelope) and <dir>/frontier (the offload frontier it was built at).
+// Read-only with respect to the NOOP store.
+//
+// --inbox-dir: decrypt + commit the phone's write-back entries (checklist answers, workout edits) into the
+// side store BEFORE the store guards, then write <out>/processed-ids (every well-named file, committed or
+// rejected) and <out>/inbox-summary. The wrapper deletes exactly those ids on the server.
+//
+// Exit codes: 0 published · 1 failed · 3 skipped (frontier not past --skip-unless-after AND no new entries).
+// On failure the LAST stderr line is `noop-publish-reason: <category>` — safe to log unattended.
 
 struct Options {
     var outDir: URL?
@@ -17,7 +26,12 @@ struct Options {
     var plaintextOut: URL?
     var selfTest = false
     var timeZone = TimeZone.current
+    var skipUnlessAfter: Int?
+    var inboxDir: URL?
+    var calorieCheck = false
 }
+
+let exitSkipped: Int32 = 3
 
 func parseArgs() throws -> Options {
     var o = Options()
@@ -50,6 +64,14 @@ func parseArgs() throws -> Options {
             o.timeZone = tz
         case "--self-test":
             o.selfTest = true
+        case "--inbox-dir":
+            guard let v = it.next() else { throw PublishError("--inbox-dir needs a directory") }
+            o.inboxDir = URL(fileURLWithPath: v, isDirectory: true)
+        case "--calorie-check":
+            o.calorieCheck = true
+        case "--skip-unless-after":
+            guard let v = it.next(), let n = Int(v) else { throw PublishError("--skip-unless-after needs a unix time") }
+            o.skipUnlessAfter = n
         case "-h", "--help":
             print("""
             noop-publish — build the phone viewer's encrypted payload.
@@ -62,6 +84,11 @@ func parseArgs() throws -> Options {
               --plaintext-out <path>      ALSO write the unencrypted JSON (debugging; keep out of git)
               --timezone <IANA>           day/'today' resolution timezone (default: system)
               --self-test                 run the crypto + gzip round-trip checks and exit
+              --skip-unless-after <unix>  exit 3 without building unless the offload frontier is newer
+                                          or the inbox committed new entries
+              --inbox-dir <dir>           decrypt + commit phone entries first; writes <out>/processed-ids
+              --calorie-check             dev: compare the ported kcal estimator to stored detected workouts
+            State dir: $NOOP_PHONE_STATE_DIR (default ~/Library/Application Support/noop-phone).
 
             The passphrase is NEVER accepted as a command-line argument: argv is visible to every
             process running as this user. `keychain` reads:
@@ -146,7 +173,52 @@ do {
         try SelfTest.run()
         exit(0)
     }
+    let stateDir: URL = {
+        if let e = ProcessInfo.processInfo.environment["NOOP_PHONE_STATE_DIR"], !e.isEmpty {
+            return URL(fileURLWithPath: e, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/noop-phone", isDirectory: true)
+    }()
+
+    if opts.calorieCheck {
+        let db = try ReadOnlyDatabase(path: try resolveDatabasePath(override: opts.dbPath))
+        try CalorieCheck.run(model: try ReadModel(db: db), timeZone: opts.timeZone)
+        exit(0)
+    }
     guard let outDir = opts.outDir else { throw PublishError("--out is required (or use --self-test)") }
+
+    // Inbox FIRST, before the store guards: committing the phone's entries must not depend on the
+    // strap's offload being fresh. The passphrase is read lazily, only when there is something to open.
+    var passphraseCache: String?
+    func getPassphrase() throws -> String {
+        if let p = passphraseCache { return p }
+        let p = try readPassphrase(opts.passphraseSource)
+        passphraseCache = p
+        return p
+    }
+    let side = try SideStore(stateDir: stateDir)
+    var committed = 0
+    if let inboxDir = opts.inboxDir {
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let hasFiles = ((try? FileManager.default.contentsOfDirectory(atPath: inboxDir.path)) ?? [])
+            .contains { $0.hasSuffix(".json") }
+        var summary = InboxSummary()
+        if hasFiles {
+            let keys = try InboxCrypto.derive(passphrase: try getPassphrase())
+            summary = try Inbox.process(dir: inboxDir, key: keys.entryKey, store: side)
+        }
+        // After COMMIT only: a crash before this point leaves nothing to delete server-side.
+        try Data(summary.processedIds.map { $0 + "\n" }.joined().utf8)
+            .write(to: outDir.appendingPathComponent("processed-ids"), options: .atomic)
+        let line = "inbox: committed=\(summary.committed) duplicate=\(summary.duplicate) rejected=\(summary.rejected)"
+        try Data((line + "\n").utf8).write(to: outDir.appendingPathComponent("inbox-summary"), options: .atomic)
+        if summary.committed + summary.duplicate + summary.rejected > 0 {
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
+        committed = summary.committed
+    }
 
     let dbPath = try resolveDatabasePath(override: opts.dbPath)
     let db = try ReadOnlyDatabase(path: dbPath)
@@ -155,14 +227,25 @@ do {
         FileHandle.standardError.write(Data("journal_mode: \(jm)\n".utf8))
     }
 
-    let model = try ReadModel(db: db)
+    // Guards and the skip check run BEFORE the read model: the model's workout-HR precompute scans
+    // hrSample, and this runs every 15 min — mostly to skip — often during a strap offload.
     let guards = try Checks.runGuards(db: db, minHrRows: opts.minHrRows, maxAgeHours: opts.maxAgeHours)
-    let payload = try Build.payload(model: model, timeZone: opts.timeZone, dataMaxTs: guards.maxTs)
-    try Checks.verify(model: model, payload: payload)
+    if let last = opts.skipUnlessAfter, guards.maxTs <= last, committed == 0 {
+        FileHandle.standardError.write(Data("noop-publish: frontier \(guards.maxTs) not past \(last); skipping\n".utf8))
+        exit(exitSkipped)
+    }
+    let model = try ReadModel(db: db)
+    let payload = try Build.payload(model: model, timeZone: opts.timeZone, dataMaxTs: guards.maxTs,
+                                    side: side, stateDir: stateDir)
+    do {
+        try Checks.verify(model: model, payload: payload)
+    } catch let e as PublishError {
+        throw PublishError(e.description, reason: "verify-failed")
+    }
 
     let plaintext = try Build.serialize(payload)
     let gz = try Gzip.compress(plaintext)
-    let passphrase = try readPassphrase(opts.passphraseSource)
+    let passphrase = try getPassphrase()
     let sealed = try Payload.seal(plaintext: gz, passphrase: passphrase)
 
     // Prove the round-trip on every publish: a payload that cannot be reopened is worse than none.
@@ -171,17 +254,22 @@ do {
 
     try Build.write(sealed: sealed, payload: payload, plaintext: plaintext,
                     outDir: outDir, plaintextOut: opts.plaintextOut)
+    // The wrapper records this as "last published frontier" only AFTER the transfer succeeds.
+    try Data("\(guards.maxTs)\n".utf8).write(to: outDir.appendingPathComponent("frontier"), options: .atomic)
 
     let kb = { (n: Int) in String(format: "%.1f KB", Double(n) / 1024.0) }
     FileHandle.standardError.write(Data("""
     published \(outDir.appendingPathComponent("noop-data.json").path)
       days=\(payload.days.count) sleeps=\(payload.sleeps.count) workouts=\(payload.workouts.count) \
-    series=\(payload.series.count)
+    series=\(payload.series.count) edited=\(payload.workouts.filter { $0.edited }.count) \
+    orphanOverrides=\(payload.orphanOverrides) ingestedIds=\(payload.ingestedEntryIds.count)
       json=\(kb(plaintext.count)) gzip=\(kb(gz.count)) sealed=\(kb(sealed.ciphertextB64.count))
       dataMaxTs=\(guards.maxTs) (\(guards.ageDescription))
     \n
     """.utf8))
 } catch {
     FileHandle.standardError.write(Data("noop-publish: \(error)\n".utf8))
+    let reason = (error as? PublishError)?.reason ?? "error"
+    FileHandle.standardError.write(Data("noop-publish-reason: \(reason)\n".utf8))
     exit(1)
 }

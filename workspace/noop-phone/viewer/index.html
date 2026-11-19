@@ -460,6 +460,14 @@
     border-radius: 12px;
     padding: 12px;
   }
+  /* Rows are <button>s (tap to open detail) — reset UA button styling to match the card look. */
+  button.workout-row {
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
   .workout-top {
     display: flex;
     justify-content: space-between;
@@ -482,6 +490,81 @@
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
   }
+
+  /* v2: per-tab data-through line, headline tile, still-syncing chip, workout detail chrome. */
+  .data-through { font-size: 12px; color: var(--text-tertiary); }
+  .headline-tile {
+    background: var(--surface-raised);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    padding: 18px 14px;
+  }
+  .headline-value {
+    margin-top: 4px;
+    font-size: 44px;
+    font-weight: 700;
+    font-variant-numeric: proportional-nums;
+  }
+  .chip-syncing { background: var(--status-warning); color: #1A1200; }
+  .back-btn {
+    align-self: flex-start;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    background: none;
+    border: none;
+    padding: 6px 0;
+  }
+  .detail-title { font-size: 22px; font-weight: 700; }
+  .detail-title:focus { outline: none; }
+  .chart-wrap svg text { font-family: inherit; }
+
+  /* v2 phase 2: write-back checklist + workout editor. Existing tokens only. */
+  .chip-pending { background: var(--accent-muted); color: var(--accent); margin-left: 6px; }
+  .detail-chips { display: flex; gap: 6px; }
+  .seg { display: inline-flex; border: 1px solid var(--hairline-strong); border-radius: 10px; overflow: hidden; background: var(--surface-inset); }
+  .seg-wide { display: flex; margin-top: 10px; }
+  .seg-wide .seg-btn { flex: 1; }
+  .seg-btn {
+    font: inherit; font-size: 14px; font-weight: 600; min-height: 40px; padding: 0 16px;
+    color: var(--text-secondary); background: transparent; border: none;
+    border-right: 1px solid var(--hairline);
+  }
+  .seg-btn:last-child { border-right: none; }
+  .seg-btn[aria-pressed="true"] { background: var(--accent); color: var(--surface-raised); }
+  .seg-clear { color: var(--text-tertiary); font-weight: 500; padding: 0 12px; }
+  .checklist-day { margin-top: 12px; font-size: 15px; font-weight: 700; }
+  .checklist-status { margin-top: 6px; font-size: 12px; color: var(--text-tertiary); }
+  .checklist-note { margin-top: 6px; font-size: 12px; color: var(--status-warning); }
+  .checklist-hint { margin-top: 12px; font-size: 12px; color: var(--text-tertiary); }
+  .effect-item { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--hairline); }
+  .effect-item-label { font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+  .effect-row { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; color: var(--text-primary); padding-top: 6px; }
+  .effect-outcome { color: var(--text-secondary); }
+  .effect-value { font-variant-numeric: tabular-nums; text-align: right; }
+  .effect-meta { font-size: 12px; color: var(--text-tertiary); }
+  .checklist { display: flex; flex-direction: column; margin-top: 8px; }
+  .check-row { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: 1px solid var(--hairline); }
+  .check-row:first-child { border-top: none; }
+  .check-label { font-size: 15px; font-weight: 600; }
+  .check-row .seg { align-self: flex-start; }
+  .edit-card { display: flex; flex-direction: column; gap: 12px; }
+  .field-row { display: flex; flex-direction: column; gap: 4px; }
+  .field-label { font-size: 12px; color: var(--text-tertiary); }
+  .field {
+    font: inherit; font-size: 16px; min-height: 44px; padding: 0 10px; width: 100%; box-sizing: border-box;
+    color: var(--text-primary); background: var(--surface-inset); border: 1px solid var(--hairline-strong); border-radius: 10px;
+  }
+  .edit-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .btn-primary, .btn-quiet, .btn-danger {
+    font: inherit; font-size: 15px; font-weight: 600; min-height: 44px; padding: 0 18px; border-radius: 10px;
+  }
+  .btn-primary { background: var(--accent); color: var(--surface-raised); border: 1px solid var(--accent); }
+  .btn-primary:active { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: 0.6; }
+  .btn-quiet { background: var(--surface-raised); color: var(--accent); border: 1px solid var(--hairline-strong); align-self: flex-start; }
+  .edit-actions .btn-quiet { align-self: auto; }
+  .btn-danger { background: var(--surface-raised); color: var(--status-critical); border: 1px solid var(--status-critical); margin-left: auto; }
 </style>
 
 <div id="ageBanner" class="age-banner" hidden></div>
@@ -511,20 +594,18 @@
   </header>
 
   <nav class="tabs" id="tabs">
-    <button class="tab active" data-tab="today" type="button">Today</button>
-    <button class="tab" data-tab="lastnight" type="button">Last night</button>
-    <button class="tab" data-tab="history" type="button">Sleep history</button>
+    <button class="tab active" data-tab="sleep" type="button">Sleep</button>
     <button class="tab" data-tab="workouts" type="button">Workouts</button>
     <button class="tab" data-tab="trends" type="button">Trends</button>
+    <button class="tab" data-tab="lifestyle" type="button">Lifestyle</button>
   </nav>
 
   <main id="main">
-    <section id="panel-today" class="panel active"></section>
-    <section id="panel-lastnight" class="panel"></section>
-    <section id="panel-history" class="panel"></section>
+    <section id="panel-sleep" class="panel active"></section>
     <section id="panel-workouts" class="panel"></section>
     <section id="panel-trends" class="panel"></section>
+    <section id="panel-lifestyle" class="panel"></section>
   </main>
 </div>
 
-<script src="app.js"></script>
+<script src="app.js?v=4"></script>

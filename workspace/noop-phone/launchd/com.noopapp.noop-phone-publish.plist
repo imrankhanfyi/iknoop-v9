@@ -9,13 +9,9 @@
         <string>/bin/zsh</string>
         <string>/Users/imrankhan/Projects/NOOP/workspace/noop-phone/scripts/publish-daily.sh</string>
     </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>8</integer>
-        <key>Minute</key>
-        <integer>15</integer>
-    </dict>
+    <!-- Every 15 min while awake; the wrapper publishes only when the offload frontier advanced. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
     <key>StandardOutPath</key>
     <string>/Users/imrankhan/Library/Logs/NOOP/noop-phone-publish.out.log</string>
     <key>StandardErrorPath</key>

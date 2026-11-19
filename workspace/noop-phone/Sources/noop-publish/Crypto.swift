@@ -77,6 +77,11 @@ enum Payload {
     }
 
     private static func deriveKey(passphrase: String, salt: Data, iterations: Int) throws -> SymmetricKey {
+        SymmetricKey(data: try pbkdf2(passphrase: passphrase, salt: salt, iterations: iterations))
+    }
+
+    /// Raw PBKDF2-HMAC-SHA256, 32 bytes. Shared by the payload key and the inbox master.
+    static func pbkdf2(passphrase: String, salt: Data, iterations: Int) throws -> Data {
         var out = Data(count: 32)
         let pass = Array(passphrase.utf8)
         let status: Int32 = out.withUnsafeMutableBytes { outBuf in
@@ -95,10 +100,10 @@ enum Payload {
             }
         }
         guard status == kCCSuccess else { throw PublishError("PBKDF2 failed (status \(status))") }
-        return SymmetricKey(data: out)
+        return out
     }
 
-    private static func randomize(_ data: inout Data) throws {
+    static func randomize(_ data: inout Data) throws {
         let status = data.withUnsafeMutableBytes { buf -> Int32 in
             SecRandomCopyBytes(kSecRandomDefault, buf.count, buf.baseAddress!)
         }
@@ -157,5 +162,52 @@ enum Gzip {
             crc = table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8)
         }
         return crc ^ 0xFFFF_FFFF
+    }
+}
+
+/// Phone -> Mac write-back channel crypto. The contract is shared byte for byte with
+/// `viewer/app.js` and `receiver/noop_inbox.py`:
+///   master    = PBKDF2-HMAC-SHA256(utf8(passphrase), salt = "noop-phone-inbox-v1", 600000, 32)
+///   authToken = hex(HMAC-SHA256(master, "inbox-auth"))
+///   entryKey  = HMAC-SHA256(master, "entry-enc")            (AES-256-GCM key)
+///   entry     = AES-GCM(entryKey, random 12-byte nonce, AAD = "noop-inbox-v1:" + id), body = ct || tag
+enum InboxCrypto {
+    static let salt = Data("noop-phone-inbox-v1".utf8)
+    static let iterations = 600_000
+
+    struct Keys {
+        let authToken: String
+        let entryKey: SymmetricKey
+        var entryKeyHex: String { entryKey.withUnsafeBytes { $0.map { String(format: "%02x", $0) }.joined() } }
+    }
+
+    static func derive(passphrase: String, iterations: Int = InboxCrypto.iterations) throws -> Keys {
+        let master = SymmetricKey(data: try Payload.pbkdf2(passphrase: passphrase, salt: salt, iterations: iterations))
+        func hmac(_ label: String) -> Data {
+            Data(HMAC<SHA256>.authenticationCode(for: Data(label.utf8), using: master))
+        }
+        let token = hmac("inbox-auth").map { String(format: "%02x", $0) }.joined()
+        return Keys(authToken: token, entryKey: SymmetricKey(data: hmac("entry-enc")))
+    }
+
+    static func aad(id: String) -> Data { Data("noop-inbox-v1:\(id)".utf8) }
+
+    static func seal(_ plaintext: Data, id: String, key: SymmetricKey,
+                     nonce: Data? = nil) throws -> (nonceB64: String, ciphertextB64: String) {
+        var n = nonce ?? Data(count: Payload.nonceBytes)
+        if nonce == nil { try Payload.randomize(&n) }
+        let box = try AES.GCM.seal(plaintext, using: key, nonce: AES.GCM.Nonce(data: n), authenticating: aad(id: id))
+        return (n.base64EncodedString(), (box.ciphertext + box.tag).base64EncodedString())
+    }
+
+    /// Throws on any authentication or shape failure. Never include the inputs in the error.
+    static func open(nonceB64: String, ciphertextB64: String, id: String, key: SymmetricKey) throws -> Data {
+        guard let n = Data(base64Encoded: nonceB64), n.count == Payload.nonceBytes,
+              let ct = Data(base64Encoded: ciphertextB64), ct.count >= 16 else {
+            throw PublishError("entry base64 malformed", reason: "entry-malformed")
+        }
+        let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: n),
+                                        ciphertext: ct.dropLast(16), tag: ct.suffix(16))
+        return try AES.GCM.open(box, using: key, authenticating: aad(id: id))
     }
 }
