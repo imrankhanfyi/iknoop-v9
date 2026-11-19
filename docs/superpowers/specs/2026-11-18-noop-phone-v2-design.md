@@ -26,6 +26,13 @@ or edits moves to the phone viewer.**
 | Lifestyle items | 13 yes/no items; caffeine stays split into morning and late, matching history. **The list is kept locally, not in git** (some items are medication), in `~/Library/Application Support/noop-phone/items.json`. New items: Imran asks Claude to add them. |
 | Write-back | **Approved:** a small receiver on Freckleclaw that stores phone-encrypted entries only. |
 
+
+**Amendment (Imran, 2026-11-19): remember on this phone.** Typing the passphrase on every open was
+rejected. The payload key now derives from the passphrase root shared with the inbox (envelope v2), and
+the viewer keeps that root on the phone as a non-extractable WebCrypto key; anyone holding the unlocked
+phone can open the page. A Face ID gate (WebAuthn PRF) was offered as a later, stronger option. Details:
+`workspace/noop-phone/README.md` (envelope v2).
+
 ## Evidence the design rests on
 
 1. **Offload throughput ≈ 10× real time.** Over 5 min on 2026-11-18, `max(gravitySample.ts)` went

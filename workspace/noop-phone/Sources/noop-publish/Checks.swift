@@ -146,30 +146,36 @@ enum SelfTest {
         let trailerCrc = gz.dropLast(4).suffix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
         if trailerCrc != Gzip.crc32(sample) { failures.append("gzip trailer CRC mismatch") }
 
-        // AES-GCM + PBKDF2 round trip, including AAD binding.
+        // AES-GCM payload round trip from the passphrase root, including AAD binding. Low iteration
+        // counts keep the self-test fast; the 600k vector is pinned in inboxChecks/payloadKey below.
         let secret = Data("recovery=74.58 strain=56.16".utf8)
-        let sealed = try Payload.seal(plaintext: secret, passphrase: "correct horse battery staple")
-        let opened = try Payload.open(sealed: sealed, passphrase: "correct horse battery staple")
+        let root = try InboxCrypto.master(passphrase: "correct horse battery staple", iterations: 1000)
+        let sealed = try Payload.seal(plaintext: secret, master: root)
+        let opened = try Payload.open(sealed: sealed, master: root)
         if opened != secret { failures.append("AES-GCM round trip lost data") }
 
         // A wrong passphrase must fail, not return garbage.
         do {
-            _ = try Payload.open(sealed: sealed, passphrase: "wrong passphrase")
+            _ = try Payload.open(sealed: sealed, master: try InboxCrypto.master(passphrase: "wrong passphrase", iterations: 1000))
             failures.append("wrong passphrase DECRYPTED — authentication is broken")
         } catch { /* expected */ }
 
-        // Tampered AAD (a downgraded iteration count) must fail the tag check.
+        // Tampered AAD must fail the tag check.
         var tampered = sealed
-        tampered.aad = Payload.aadString(iterations: 1000, saltB64: sealed.saltB64,
-                                         nonceB64: sealed.nonceB64)
+        tampered.aad = "noopv1:\(sealed.saltB64):\(sealed.nonceB64)"
         do {
-            _ = try Payload.open(sealed: tampered, passphrase: "correct horse battery staple")
-            failures.append("tampered AAD accepted — parameter downgrade is possible")
+            _ = try Payload.open(sealed: tampered, master: root)
+            failures.append("tampered AAD accepted — envelope binding is broken")
         } catch { /* expected */ }
 
+        // A swapped salt must fail too (it selects the payload key).
+        var swapped = sealed
+        swapped.saltB64 = Data(count: Payload.saltBytes).base64EncodedString()
+        if (try? Payload.open(sealed: swapped, master: root)) != nil { failures.append("swapped salt accepted") }
+
         // Fresh salt AND nonce on every seal (see Crypto.swift for why this matters).
-        let a = try Payload.seal(plaintext: secret, passphrase: "p")
-        let b = try Payload.seal(plaintext: secret, passphrase: "p")
+        let a = try Payload.seal(plaintext: secret, master: root)
+        let b = try Payload.seal(plaintext: secret, master: root)
         if a.saltB64 == b.saltB64 { failures.append("salt is not fresh per publish") }
         if a.nonceB64 == b.nonceB64 { failures.append("nonce is not fresh per publish") }
 
@@ -250,6 +256,14 @@ extension SelfTest {
             }
             if keys.entryKeyHex != "13bfc24aab3da2fa145ee1fa4eeaaee9810ec32dab1852e96067f34143a4fd82" {
                 failures.append("inbox entryKey vector mismatch")
+            }
+            // v2 payload key from the same root, zero salt (computed independently with Python hashlib;
+            // viewer/app.js payloadKeyV2 must produce the same bytes).
+            let pk = Payload.payloadKey(master: try InboxCrypto.master(passphrase: "phase1-test"),
+                                        saltB64: Data(count: 16).base64EncodedString())
+            let pkHex = pk.withUnsafeBytes { $0.map { String(format: "%02x", $0) }.joined() }
+            if pkHex != "1dc08482d106c06aa2b8b477599120bc956ee79733f46ce4c3f4ffe2a3f33d58" {
+                failures.append("payload key vector mismatch")
             }
             // Seal/open round trip, bound to the id via AAD.
             let id = "11111111-2222-4333-8444-555555555555"

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // noop-publish — build the phone viewer's encrypted payload from the live NOOP store.
 //
@@ -190,12 +191,13 @@ do {
 
     // Inbox FIRST, before the store guards: committing the phone's entries must not depend on the
     // strap's offload being fresh. The passphrase is read lazily, only when there is something to open.
-    var passphraseCache: String?
-    func getPassphrase() throws -> String {
-        if let p = passphraseCache { return p }
-        let p = try readPassphrase(opts.passphraseSource)
-        passphraseCache = p
-        return p
+    // One PBKDF2 per run, and only when needed: the root opens inbox entries and seals the payload.
+    var masterCache: SymmetricKey?
+    func master() throws -> SymmetricKey {
+        if let m = masterCache { return m }
+        let m = try InboxCrypto.master(passphrase: try readPassphrase(opts.passphraseSource))
+        masterCache = m
+        return m
     }
     let side = try SideStore(stateDir: stateDir)
     var committed = 0
@@ -206,7 +208,7 @@ do {
             .contains { $0.hasSuffix(".json") }
         var summary = InboxSummary()
         if hasFiles {
-            let keys = try InboxCrypto.derive(passphrase: try getPassphrase())
+            let keys = InboxCrypto.derive(master: try master())
             summary = try Inbox.process(dir: inboxDir, key: keys.entryKey, store: side)
         }
         // After COMMIT only: a crash before this point leaves nothing to delete server-side.
@@ -245,11 +247,10 @@ do {
 
     let plaintext = try Build.serialize(payload)
     let gz = try Gzip.compress(plaintext)
-    let passphrase = try getPassphrase()
-    let sealed = try Payload.seal(plaintext: gz, passphrase: passphrase)
+    let sealed = try Payload.seal(plaintext: gz, master: try master())
 
     // Prove the round-trip on every publish: a payload that cannot be reopened is worse than none.
-    let reopened = try Payload.open(sealed: sealed, passphrase: passphrase)
+    let reopened = try Payload.open(sealed: sealed, master: try master())
     guard reopened == gz else { throw PublishError("seal/open round-trip mismatch — refusing to publish") }
 
     try Build.write(sealed: sealed, payload: payload, plaintext: plaintext,

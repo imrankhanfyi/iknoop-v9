@@ -71,7 +71,12 @@ lifestyle check-ins + effects); the Mac is an unattended collector. NOOP.app was
 - **LaunchAgent re-enabled 2026-11-18 17:57** (was paused during Phase 2); wrapper now passes
   `--max-age-hours 240`. First real v2 publish: `bytes=69731 frontier=1794446844`.
 - **Phases 2 and 3 deployed 2026-11-18** (checklist + workout edits via the inbox; Effects via vendored
-  `EffectRanker` + answered-days adapter). **Next:** Imran checks it on the real iPhone. Lifestyle items (17) live in `~/Library/Application Support/noop-phone/items.json` —
+  `EffectRanker` + answered-days adapter).
+- **2026-11-19:** real-iPhone round trip verified (17 checklist answers → `inbox committed=17`). Envelope
+  v2 + "remember on this phone" deployed (viewer `app.js?v=5`, live viewer backed up as
+  `/root/noop-backups/viewer-v2-*`); browser test passed in headless Chrome, Safari/iPhone reopen unconfirmed.
+  NOOP stalled in "Pairing…" for ~80 min after a 09:01 reconnect (bond ack never came; quit and reopen
+  fixed it) — candidate fix: a timeout and retry for a stuck pairing in BLEManager. Lifestyle items (17) live in `~/Library/Application Support/noop-phone/items.json` —
   never in git (medication names).
 - **Open — offload slowing:** on 2026-11-18 the gravity frontier advanced ~10× real time at 17:00, ~4–6× at
   17:20, ~2.7× by 17:57 (7-day backlog). Unexplained; if it holds, a closed-lid night takes far longer than

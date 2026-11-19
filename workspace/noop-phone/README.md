@@ -97,10 +97,21 @@ number is never mistaken for a current one.
   history offload — must be within the age limit. Not `hrSample`: live HR streams in real time while the
   offload can lag by days (2026-11-18: HR current, gravity 7 days behind), so an HR-keyed gate passes
   and ships week-stale nights that look fresh. The frontier is also the envelope's `dataMaxTs`.
-- **Fresh random salt and nonce every publish**, so each day's key is unique and nonce reuse across
-  publishes is impossible by construction. PBKDF2-HMAC-SHA256 at 600,000 iterations; AES-256-GCM with
-  a 96-bit nonce and 128-bit tag; the KDF parameters are bound as AAD so a tampered envelope cannot
-  downgrade the iteration count. Every publish proves its own seal/open round-trip before writing.
+- **Envelope v2 (2026-11-19): one passphrase root, a fresh key per publish.** The root is
+  PBKDF2-HMAC-SHA256(passphrase, "noop-phone-inbox-v1", 600,000) — the same root as the inbox keys.
+  Each publish draws a fresh random salt and nonce, and the payload key is
+  HMAC-SHA256(root, "noop-payload-v2:" + saltB64), so every payload still has its own key and nonce
+  reuse across publishes is impossible by construction. AES-256-GCM, 96-bit nonce, 128-bit tag; the
+  format version, salt and nonce are bound as AAD. The viewer hard-codes the root's salt and iteration
+  count (never reads them from the envelope), since the root also yields the inbox auth token. Every
+  publish proves its own seal/open round-trip before writing. v1 (a per-publish PBKDF2 from the
+  passphrase) is still readable by the viewer.
+- **"Remember on this phone" (Imran's decision, 2026-11-19).** The viewer keeps the root in
+  IndexedDB as a non-extractable WebCrypto HMAC key (page script can use it but never read its bytes),
+  so the page opens without the passphrase. Trade-off accepted: anyone holding the unlocked phone can
+  open it. "Forget" deletes the key; a key that no longer opens the payload (passphrase changed) is
+  deleted and the passphrase asked for again. Safari can evict a site's storage after 7 days unvisited
+  (Home Screen web apps are exempt). Older builds kept the raw root in sessionStorage; the viewer wipes it.
 - **Atomic write** (temp file + rename): an in-place overwrite is not atomic, and a phone fetching
   mid-write would get a short file whose GCM tag then fails — surfacing as the actively misleading
   "wrong passphrase".
@@ -152,8 +163,9 @@ curl --fail --silent --show-error \
   https://freckleclaw.tail4d0805.ts.net:8444/noop-data.json -o /dev/null
 ```
 
-On the iPhone, connect Tailscale, open the URL above, and enter the existing passphrase. Refreshing
-shows the latest encrypted snapshot; the viewer displays its age.
+On the iPhone, connect Tailscale, open the URL above, and enter the existing passphrase once ("Remember
+on this phone" is ticked by default). Refreshing shows the latest encrypted snapshot; the viewer displays
+its age.
 
 Optional and separable (Phase 2 of the plan, never built): a morning recovery digest pushed to Telegram
 by the Mac with `deliver_only: true`. It inherently puts a few numbers in front of Telegram and the VPS
@@ -190,7 +202,7 @@ workspace/noop-phone/
 │   ├── WorkoutVisibility.swift  port of Strand/Data/WorkoutSource.swift
 │   ├── RestComposite.swift    port of AnalyticsEngine.Rest.composite
 │   ├── Tombstones.swift       UserDefaults dismissal spans
-│   ├── Crypto.swift           PBKDF2 + AES-GCM + gzip
+│   ├── Crypto.swift           passphrase root, payload/inbox keys, AES-GCM, gzip
 │   ├── Build.swift            payload assembly, JSON, atomic write
 │   └── Checks.swift           publish guards, assertions, --self-test
 └── viewer/

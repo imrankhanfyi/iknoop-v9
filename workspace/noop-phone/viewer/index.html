@@ -577,12 +577,12 @@
     <div class="gate-form-body">
       <input type="password" id="passphraseInput" name="passphrase" autocomplete="current-password" placeholder="Passphrase" required>
       <label class="remember-row">
-        <input type="checkbox" id="rememberCheckbox">
-        Remember on this device (less secure)
+        <input type="checkbox" id="rememberCheckbox" checked>
+        Remember on this phone
       </label>
       <button type="submit">Unlock</button>
       <p id="gateError" class="gate-error" role="alert"></p>
-      <p class="remember-note">Remembering stores a derived key in this browser tab's session only — it clears the moment the tab closes, and never stores the passphrase itself.</p>
+      <p class="remember-note">Remembering keeps a key on this phone that can't be copied off it, so the page opens without the passphrase. Anyone holding your unlocked phone could open it. The passphrase itself is never stored; "Forget" removes the key.</p>
     </div>
   </form>
 </div>
@@ -608,4 +608,4 @@
   </main>
 </div>
 
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>

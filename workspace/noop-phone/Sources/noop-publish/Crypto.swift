@@ -6,17 +6,18 @@ import Compression
 /// Payload encryption. Both primitives are chosen for native WebCrypto interop so the viewer needs
 /// no JS crypto library: PBKDF2-HMAC-SHA256 and AES-256-GCM with a 96-bit nonce and 128-bit tag.
 enum Payload {
-    /// Iteration count. Deliberately high and explicit: the ciphertext is expected to be readable by
-    /// whoever hosts it, so an offline dictionary attack on the passphrase is the real threat model and
-    /// there is no rate limit to fall back on. PBKDF2 is not memory-hard, so the count is the only
-    /// lever. 600k matches current OWASP guidance for PBKDF2-HMAC-SHA256.
-    ///
-    /// This value is a COMPATIBILITY CONTRACT with the viewer: it is written into the envelope and the
-    /// browser reads it from there, so changing it here does not break old payloads mid-flight.
+    /// Iteration count for the passphrase ROOT (InboxCrypto.master). Deliberately high: the ciphertext
+    /// is readable by whoever hosts it, so an offline dictionary attack on the passphrase is the real
+    /// threat model. PBKDF2 is not memory-hard, so the count is the only lever. 600k matches current
+    /// OWASP guidance for PBKDF2-HMAC-SHA256. The viewer hard-codes it (never reads it from the
+    /// envelope), because the same root also produces the inbox auth token.
     static let pbkdf2Iterations = 600_000
     static let saltBytes = 16
     static let nonceBytes = 12   // 96 bits — required for WebCrypto AES-GCM interop
-    static let formatVersion = 1
+    /// v2 (2026-11-19): payload key derived from the passphrase root, so the phone can remember the root
+    /// and open every publish without the passphrase. v1 derived each payload key from the passphrase.
+    static let formatVersion = 2
+    static let kdfAlg = "HMAC-SHA256(root, noop-payload-v2:salt)"
 
     struct Sealed {
         var saltB64: String
@@ -25,27 +26,31 @@ enum Payload {
         var aad: String
     }
 
-    /// Derive, then seal. A FRESH random salt and nonce are generated on every publish.
+    /// payloadKey = HMAC-SHA256(master, "noop-payload-v2:" + saltB64). Contract shared byte for byte with
+    /// viewer/app.js (payloadKeyV2); pinned by a test vector in the self-test.
+    static func payloadKey(master: SymmetricKey, saltB64: String) -> SymmetricKey {
+        SymmetricKey(data: Data(HMAC<SHA256>.authenticationCode(for: Data("noop-payload-v2:\(saltB64)".utf8),
+                                                                using: master)))
+    }
+
+    /// Seal with a FRESH random salt and nonce on every publish.
     ///
-    /// WHY FRESH SALT EVERY TIME: a stable salt means one derived key encrypts every daily payload for
-    /// years, which makes GCM nonce hygiene load-bearing and gives a single key leak retrospective
-    /// access to every stored copy. A fresh salt per publish makes each day's key unique, so nonce
-    /// reuse across publishes is harmless by construction. It is also why the viewer cannot cache a
-    /// derived key across publishes — that trade is deliberate.
-    static func seal(plaintext: Data, passphrase: String) throws -> Sealed {
+    /// WHY FRESH SALT EVERY TIME: every payload gets its own key, so GCM nonce reuse across publishes is
+    /// harmless by construction. Since v2 the phone may remember the passphrase root (the user chose
+    /// "remember on this phone", 2026-11-19), which opens every payload; that root is held on the phone as
+    /// a non-extractable WebCrypto key.
+    static func seal(plaintext: Data, master: SymmetricKey) throws -> Sealed {
         var salt = Data(count: saltBytes)
         try randomize(&salt)
-        let key = try deriveKey(passphrase: passphrase, salt: salt, iterations: pbkdf2Iterations)
+        let saltB64 = salt.base64EncodedString()
+        let key = payloadKey(master: master, saltB64: saltB64)
 
         var nonceData = Data(count: nonceBytes)
         try randomize(&nonceData)
         let nonce = try AES.GCM.Nonce(data: nonceData)
 
-        // AAD binds the KDF/cipher parameters to the ciphertext, so a tampered envelope that tries to
-        // downgrade the iteration count (or swap the salt) fails the tag check instead of being
-        // silently honoured. The viewer reconstructs this exact string from the envelope fields.
-        let aad = aadString(iterations: pbkdf2Iterations, saltB64: salt.base64EncodedString(),
-                            nonceB64: nonceData.base64EncodedString())
+        // AAD binds the format version, salt and nonce to the ciphertext.
+        let aad = aadString(saltB64: saltB64, nonceB64: nonceData.base64EncodedString())
         let box = try AES.GCM.seal(plaintext, using: key, nonce: nonce,
                                    authenticating: Data(aad.utf8))
         // combined = nonce ‖ ciphertext ‖ tag; the viewer is given ciphertext‖tag and the nonce
@@ -53,31 +58,25 @@ enum Payload {
         guard let combined = box.combined else { throw PublishError("AES-GCM seal produced no combined box") }
         let ctAndTag = combined.dropFirst(nonceBytes)
 
-        return Sealed(saltB64: salt.base64EncodedString(),
+        return Sealed(saltB64: saltB64,
                       nonceB64: nonceData.base64EncodedString(),
                       ciphertextB64: Data(ctAndTag).base64EncodedString(),
                       aad: aad)
     }
 
-    /// Round-trip check used by `--self-test`: proves the sealed payload decrypts back to the exact
-    /// input bytes with the same parameters the viewer will use.
-    static func open(sealed: Sealed, passphrase: String) throws -> Data {
-        guard let salt = Data(base64Encoded: sealed.saltB64),
-              let nonceData = Data(base64Encoded: sealed.nonceB64),
+    /// Round-trip check used by `--self-test` and every publish.
+    static func open(sealed: Sealed, master: SymmetricKey) throws -> Data {
+        guard let nonceData = Data(base64Encoded: sealed.nonceB64),
               let ctAndTag = Data(base64Encoded: sealed.ciphertextB64) else {
             throw PublishError("envelope base64 is malformed")
         }
-        let key = try deriveKey(passphrase: passphrase, salt: salt, iterations: pbkdf2Iterations)
+        let key = payloadKey(master: master, saltB64: sealed.saltB64)
         let box = try AES.GCM.SealedBox(combined: nonceData + ctAndTag)
         return try AES.GCM.open(box, using: key, authenticating: Data(sealed.aad.utf8))
     }
 
-    static func aadString(iterations: Int, saltB64: String, nonceB64: String) -> String {
-        "noopv\(formatVersion):\(iterations):\(saltB64):\(nonceB64)"
-    }
-
-    private static func deriveKey(passphrase: String, salt: Data, iterations: Int) throws -> SymmetricKey {
-        SymmetricKey(data: try pbkdf2(passphrase: passphrase, salt: salt, iterations: iterations))
+    static func aadString(saltB64: String, nonceB64: String) -> String {
+        "noopv\(formatVersion):\(saltB64):\(nonceB64)"
     }
 
     /// Raw PBKDF2-HMAC-SHA256, 32 bytes. Shared by the payload key and the inbox master.
@@ -181,8 +180,16 @@ enum InboxCrypto {
         var entryKeyHex: String { entryKey.withUnsafeBytes { $0.map { String(format: "%02x", $0) }.joined() } }
     }
 
+    /// The passphrase root shared by the inbox keys and (since v2) the payload key.
+    static func master(passphrase: String, iterations: Int = InboxCrypto.iterations) throws -> SymmetricKey {
+        SymmetricKey(data: try Payload.pbkdf2(passphrase: passphrase, salt: salt, iterations: iterations))
+    }
+
     static func derive(passphrase: String, iterations: Int = InboxCrypto.iterations) throws -> Keys {
-        let master = SymmetricKey(data: try Payload.pbkdf2(passphrase: passphrase, salt: salt, iterations: iterations))
+        derive(master: try master(passphrase: passphrase, iterations: iterations))
+    }
+
+    static func derive(master: SymmetricKey) -> Keys {
         func hmac(_ label: String) -> Data {
             Data(HMAC<SHA256>.authenticationCode(for: Data(label.utf8), using: master))
         }

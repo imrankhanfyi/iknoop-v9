@@ -72,18 +72,36 @@ function b64FromBytes(bytes) {
 
 function utf8(str) { return new TextEncoder().encode(str); }
 
-/** Derive an AES-256-GCM key from a passphrase via PBKDF2-HMAC-SHA256, per the envelope's kdf params. */
+/** v1 envelopes only: derive the payload's AES-256-GCM key straight from the passphrase via
+ * PBKDF2-HMAC-SHA256 with the envelope's own salt. Kept so a v1 payload still opens during rollout. */
 async function deriveKey(passphrase, saltB64, iterations) {
   const baseKey = await crypto.subtle.importKey('raw', utf8(passphrase), 'PBKDF2', false, ['deriveKey']);
   const salt = bytesFromB64(saltB64);
-  // extractable: true — needed so "Remember on this device" can export the raw key into sessionStorage.
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
     baseKey,
     { name: 'AES-GCM', length: 256 },
-    true,
+    false,
     ['decrypt']
   );
+}
+
+/** v2 envelopes: payloadKey = HMAC-SHA256(master, "noop-payload-v2:" + saltB64), with a fresh random
+ * salt on every publish (so every payload still gets its own key). `masterKey` is the non-extractable
+ * HMAC CryptoKey of the passphrase root shared with the inbox (see section 5b). Contract shared byte for
+ * byte with Sources/noop-publish/Crypto.swift (Payload.payloadKey). */
+async function payloadKeyV2(masterKey, saltB64) {
+  const raw = new Uint8Array(await crypto.subtle.sign('HMAC', masterKey, utf8('noop-payload-v2:' + saltB64)));
+  try {
+    return await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt']);
+  } finally { raw.fill(0); }
+}
+
+/** The key that opens `envelope`: v2 from the master key, v1 from the passphrase (null if unavailable). */
+async function envelopeKey(envelope, masterKey, passphrase) {
+  if (envelope.v === 2) return payloadKeyV2(masterKey, envelope.kdf.saltB64);
+  if (passphrase == null) return null;
+  return deriveKey(passphrase, envelope.kdf.saltB64, envelope.kdf.iterations);
 }
 
 /** gzip-decompress an ArrayBuffer to a UTF-8 string using the native DecompressionStream. */
@@ -107,36 +125,66 @@ async function decryptEnvelope(envelope, key) {
   return JSON.parse(text);
 }
 
-// "Remember on this device" — stores ONLY the derived AES key (never the passphrase) in
-// sessionStorage, tagged with the salt/iterations it was derived from. sessionStorage clears when
-// the tab closes, and a stale key (from a previous publish's salt) is simply ignored, not reused.
-const REMEMBER_KEYS = { key: 'noopViewerKeyB64', salt: 'noopViewerKeySalt', iter: 'noopViewerKeyIter' };
+// "Remember on this phone" (2026-11-19 decision: open without a passphrase on this phone).
+// What is kept: the passphrase ROOT (the inbox master, section 5b) as a NON-EXTRACTABLE HMAC CryptoKey in
+// IndexedDB. Page script can use it to derive keys but can never read its bytes back out; the passphrase
+// itself is never stored. Anyone holding this unlocked phone can open the page — the phone's own lock is
+// the gate. "Forget" deletes it. Safari may evict IndexedDB for a site unvisited for 7 days (Home Screen
+// web apps are exempt); then the passphrase is simply asked for again.
+const DEVICE_DB = 'noop-viewer';
+const DEVICE_STORE = 'keys';
+const DEVICE_KEY_ID = 'master';
 
-function saveRememberedKey(keyB64, saltB64, iterations) {
-  try {
-    sessionStorage.setItem(REMEMBER_KEYS.key, keyB64);
-    sessionStorage.setItem(REMEMBER_KEYS.salt, saltB64);
-    sessionStorage.setItem(REMEMBER_KEYS.iter, String(iterations));
-  } catch (e) { /* sessionStorage unavailable (private mode etc.) — silently skip remembering */ }
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DEVICE_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(DEVICE_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
 }
 
-function loadRememberedKey() {
+async function idbRun(mode, op) {
+  const db = await idbOpen();
   try {
-    const keyB64 = sessionStorage.getItem(REMEMBER_KEYS.key);
-    const saltB64 = sessionStorage.getItem(REMEMBER_KEYS.salt);
-    const iter = sessionStorage.getItem(REMEMBER_KEYS.iter);
-    if (!keyB64 || !saltB64 || !iter) return null;
-    return { keyB64, saltB64, iterations: Number(iter) };
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(DEVICE_STORE, mode);
+      const req = op(tx.objectStore(DEVICE_STORE));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally { db.close(); }
+}
+
+async function saveDeviceKey(masterKey) {
+  try {
+    await idbRun('readwrite', s => s.put(masterKey, DEVICE_KEY_ID));
+    try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) { /* best effort */ }
+    return true;
+  } catch (e) {
+    console.error('NOOP viewer: could not remember the key on this device', e);
+    return false;
+  }
+}
+
+async function loadDeviceKey() {
+  try {
+    const k = await idbRun('readonly', s => s.get(DEVICE_KEY_ID));
+    return (typeof CryptoKey !== 'undefined' && k instanceof CryptoKey) ? k : null;
   } catch (e) { return null; }
 }
 
-function clearRememberedKey() {
+async function clearDeviceKey() {
+  try { await idbRun('readwrite', s => s.delete(DEVICE_KEY_ID)); } catch (e) { /* nothing stored */ }
+}
+
+/** Earlier builds kept a derived key — and the raw inbox master — in sessionStorage. Wipe them. */
+function clearLegacySessionKeys() {
   try {
-    sessionStorage.removeItem(REMEMBER_KEYS.key);
-    sessionStorage.removeItem(REMEMBER_KEYS.salt);
-    sessionStorage.removeItem(REMEMBER_KEYS.iter);
-    sessionStorage.removeItem('noopViewerInboxMaster');
-  } catch (e) { /* ignore */ }
+    ['noopViewerKeyB64', 'noopViewerKeySalt', 'noopViewerKeyIter', 'noopViewerInboxMaster']
+      .forEach(k => sessionStorage.removeItem(k));
+  } catch (e) { /* storage unavailable */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -784,6 +832,7 @@ function renderTrends(payload) {
 //   master    = PBKDF2-HMAC-SHA256(utf8(passphrase), salt "noop-phone-inbox-v1", 600000, 32 bytes)
 //   authToken = hex(HMAC-SHA256(master, "inbox-auth"))
 //   entryKey  = HMAC-SHA256(master, "entry-enc")                    (AES-256-GCM)
+//   payloadKey= HMAC-SHA256(master, "noop-payload-v2:" + envelope saltB64)  (v2 payloads, section 2)
 //   entry     = AES-GCM(entryKey, random 12-byte nonce, AAD "noop-inbox-v1:" + id); body = ct || tag
 // Every tap is sealed immediately and ONLY the sealed envelope is queued in localStorage, so no
 // plaintext answer or workout edit ever sits in browser storage.
@@ -791,22 +840,26 @@ function renderTrends(payload) {
 
 const INBOX_SALT = 'noop-phone-inbox-v1';
 const INBOX_ITERATIONS = 600000;
-const INBOX_MASTER_KEY = 'noopViewerInboxMaster';
 const INBOX_QUEUE_KEY = 'noopInboxQueue_v1';
 
 function hexFromBytes(bytes) {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function deriveInboxMaster(passphrase) {
+/** The passphrase root, returned ONLY as a non-extractable HMAC CryptoKey; the raw bytes are zeroed.
+ * The salt and iteration count are constants here, never read from the envelope: this root also
+ * produces the server auth token, so a tampered envelope must not be able to weaken it. */
+async function deriveMasterKey(passphrase) {
   const base = await crypto.subtle.importKey('raw', utf8(passphrase), 'PBKDF2', false, ['deriveBits']);
-  return new Uint8Array(await crypto.subtle.deriveBits(
+  const raw = new Uint8Array(await crypto.subtle.deriveBits(
     { name: 'PBKDF2', salt: utf8(INBOX_SALT), iterations: INBOX_ITERATIONS, hash: 'SHA-256' }, base, 256));
+  try {
+    return await crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  } finally { raw.fill(0); }
 }
 
-async function inboxKeysFromMaster(master) {
-  const hk = await crypto.subtle.importKey('raw', master, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const mac = async label => new Uint8Array(await crypto.subtle.sign('HMAC', hk, utf8(label)));
+async function inboxKeysFromMaster(masterKey) {
+  const mac = async label => new Uint8Array(await crypto.subtle.sign('HMAC', masterKey, utf8(label)));
   const token = hexFromBytes(await mac('inbox-auth'));
   const entryKey = await crypto.subtle.importKey('raw', await mac('entry-enc'), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
   return { token, entryKey };
@@ -829,12 +882,6 @@ async function openEntry(env, keys) {
   return JSON.parse(new TextDecoder().decode(pt));
 }
 
-function saveInboxMaster(master) {
-  try { sessionStorage.setItem(INBOX_MASTER_KEY, b64FromBytes(master)); } catch (e) { /* ignore */ }
-}
-function loadInboxMaster() {
-  try { const v = sessionStorage.getItem(INBOX_MASTER_KEY); return v ? bytesFromB64(v) : null; } catch (e) { return null; }
-}
 
 function loadQueue() {
   try { const a = JSON.parse(localStorage.getItem(INBOX_QUEUE_KEY) || '[]'); return Array.isArray(a) ? a : []; }
@@ -1037,9 +1084,9 @@ let lifestyleMode = 'yesterday';   // 'yesterday' (default) | 'tonight'
 
 function inboxUnavailableCard() {
   const c = el('div', { class: 'card' });
-  c.appendChild(el('p', { class: 'empty-state' }, ['Answers can’t be filed from this session — it was unlocked with a remembered key that predates filing. Sign in again with your passphrase.']));
+  c.appendChild(el('p', { class: 'empty-state' }, ['Answers can’t be filed from this session. Sign in again with your passphrase.']));
   const b = el('button', { class: 'table-toggle', type: 'button' }, ['Sign in again']);
-  b.addEventListener('click', () => { clearRememberedKey(); location.reload(); });
+  b.addEventListener('click', async () => { await clearDeviceKey(); location.reload(); });
   c.appendChild(b);
   return c;
 }
@@ -1272,9 +1319,9 @@ function renderAgeInfo(env) {
   }
 }
 
-async function showApp(master) {
-  if (master) {
-    try { await initInbox(await inboxKeysFromMaster(master), payload.ingestedEntryIds); }
+async function showApp(masterKey) {
+  if (masterKey) {
+    try { await initInbox(await inboxKeysFromMaster(masterKey), payload.ingestedEntryIds); }
     catch (e) { console.error('NOOP viewer: inbox init failed', e); inboxKeys = null; }
   }
   $('gate').hidden = true;
@@ -1302,18 +1349,19 @@ function wireTabs() {
 function wireForgetButton() {
   const btn = $('forgetBtn');
   btn.hidden = false;
-  btn.addEventListener('click', () => {
-    clearRememberedKey();
+  btn.addEventListener('click', async () => {
+    await clearDeviceKey();
     location.reload();
   });
 }
 
-function wireGateForm() {
+function wireGateForm(note) {
   const form = $('gateForm');
   const input = $('passphraseInput');
   const remember = $('rememberCheckbox');
   const errorEl = $('gateError');
   const submitBtn = form.querySelector('button[type="submit"]');
+  if (note) errorEl.textContent = note;
 
   form.addEventListener('submit', async ev => {
     ev.preventDefault();
@@ -1322,22 +1370,15 @@ function wireGateForm() {
     if (!passphrase) return;
     submitBtn.disabled = true;
     try {
-      // Payload key and inbox master are independent PBKDF2 runs (different salts): derive in parallel.
-      const [key, master] = await Promise.all([
-        deriveKey(passphrase, envelope.kdf.saltB64, envelope.kdf.iterations),
-        deriveInboxMaster(passphrase),
-      ]);
-      payload = await decryptEnvelope(envelope, key);
-      if (remember.checked) {
-        const raw = await crypto.subtle.exportKey('raw', key);
-        saveRememberedKey(b64FromBytes(new Uint8Array(raw)), envelope.kdf.saltB64, envelope.kdf.iterations);
-        saveInboxMaster(master);
-        wireForgetButton();
-      } else {
-        clearRememberedKey();
-      }
+      const masterKey = await deriveMasterKey(passphrase);
+      payload = await decryptEnvelope(envelope, await envelopeKey(envelope, masterKey, passphrase));
       input.value = '';
-      await showApp(master);
+      if (remember.checked) {
+        if (await saveDeviceKey(masterKey)) wireForgetButton();
+      } else {
+        await clearDeviceKey();
+      }
+      await showApp(masterKey);
     } catch (e) {
       // Never leak the raw error object into the DOM — a stack trace can hint at internals to
       // anyone shoulder-surfing. Log it for local debugging only.
@@ -1377,23 +1418,31 @@ async function init() {
     return;
   }
 
-  // Try a silent unlock via a key remembered earlier THIS session, but only if it was derived from
-  // the exact salt/iteration count this envelope carries (a fresh publish always mints a new salt,
-  // so a stale remembered key harmlessly falls through to the passphrase form).
-  const remembered = loadRememberedKey();
-  if (remembered && envelope.kdf && remembered.saltB64 === envelope.kdf.saltB64 && remembered.iterations === envelope.kdf.iterations) {
+  clearLegacySessionKeys();
+
+  // Silent unlock with the key remembered on this phone. A GCM failure means the stored root no longer
+  // matches (the passphrase was changed on the Mac): forget it and ask again. A v1 envelope (published
+  // before this format) cannot be opened from the root, so it falls through to the form, key kept.
+  let note = '';
+  const deviceKey = await loadDeviceKey();
+  if (deviceKey && envelope.v === 2) {
+    let opened = false;
     try {
-      const key = await crypto.subtle.importKey('raw', bytesFromB64(remembered.keyB64), { name: 'AES-GCM' }, true, ['decrypt']);
-      payload = await decryptEnvelope(envelope, key);
-      await showApp(loadInboxMaster());
+      payload = await decryptEnvelope(envelope, await payloadKeyV2(deviceKey, envelope.kdf.saltB64));
+      opened = true;
+    } catch (e) {
+      console.error('NOOP viewer: remembered key did not open this payload', e);
+      await clearDeviceKey();
+      note = 'This phone’s saved key no longer works — the passphrase may have changed. Enter it again.';
+    }
+    if (opened) {
+      await showApp(deviceKey);
       wireForgetButton();
       return;
-    } catch (e) {
-      clearRememberedKey();
     }
   }
 
-  wireGateForm();
+  wireGateForm(note);
 }
 
 document.addEventListener('DOMContentLoaded', init);
