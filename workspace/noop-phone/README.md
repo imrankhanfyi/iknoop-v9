@@ -135,6 +135,14 @@ Tailscale HTTPS supplies the browser secure context required by WebCrypto. Keepi
 the agent-writable Hermes tree means a Hermes agent cannot replace its JavaScript to capture the
 passphrase. The old plugin approach was rejected for both reasons; do not recreate it.
 
+**Updating the viewer.** Bump `app.js?v=N` in `index.html` with every change to `app.js`, then copy
+both files to `/srv/noop-health` (scp to a `.pending` name, `chown root:root`, `chmod 0644`, `mv`).
+Deploy the viewer BEFORE any publisher change it must be able to read. `tailscale serve` sends no
+`Cache-Control`, so a phone can keep an old `index.html`. Since v6 the page re-fetches itself
+bypassing the cache on every open and reloads once when the version differs. Pages older than v6
+can't do that: add `?v=N` to the URL once to get past the cached copy (2026-11-19). A copy of the
+previous live page is kept in `/root/noop-backups/viewer-v2-*`.
+
 ### Publishing (every 15 minutes, frontier-triggered)
 
 The Mac has a Keychain item named `noop-publish` and a per-user LaunchAgent,
