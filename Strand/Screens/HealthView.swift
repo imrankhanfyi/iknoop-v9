@@ -174,21 +174,32 @@ private struct SyncStatusSection: View {
     /// The status line above the button: an in-progress pill while syncing (with the live chunk count),
     /// else a last-synced read-out, else an honest "not connected".
     @ViewBuilder private var statusRow: some View {
-        if live.backfilling {
+        switch SyncStatusPill.resolve(backfilling: live.backfilling, connected: live.connected,
+                                      encryptedBond: live.encryptedBond, lastSyncedAt: live.lastSyncedAt,
+                                      now: Date().timeIntervalSince1970) {
+        case .syncing:
             // Reuse the shared in-progress affordance so this matches every other "syncing history" surface.
             SyncingHistoryNote(chunks: live.syncChunksThisSession)
-        } else if !live.connected {
+        case .noStrap:
             StatePill("No strap connected", tone: .neutral, showsDot: false)
-        } else if let last = live.lastSyncedAt {
+        case .pairing:
+            StatePill("Pairing…", tone: .accent, showsDot: true, pulsing: true)
+        case .readyToSync:
+            StatePill("Ready to sync", tone: .accent, showsDot: true, pulsing: false)
+        case .synced(let last):
             HStack(spacing: 8) {
                 StatePill("History synced", tone: .positive)
                 Text(relativeAgo(last))
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
             }
-        } else {
-            StatePill(live.encryptedBond ? "Ready to sync" : "Pairing…",
-                      tone: .accent, showsDot: true, pulsing: !live.encryptedBond)
+        case .lastFullSync(let last):
+            HStack(spacing: 8) {
+                StatePill("Last full sync", tone: .warning)
+                Text(relativeAgo(last))
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+            }
         }
     }
 
@@ -203,6 +214,34 @@ private struct SyncStatusSection: View {
             return String(localized: "Finishing the pairing handshake. Sync now becomes available once the strap is paired.")
         }
         return String(localized: "Syncs your strap's stored history right away, instead of waiting for the next automatic sync.")
+    }
+}
+
+/// What the Sync card's status line says. Pure so it can be unit-tested.
+///
+/// `lastSyncedAt` is stamped only when an offload reaches HISTORY_COMPLETE (the strap reported nothing
+/// left to send) — not when a pass banks rows and then ends on the idle timeout or a disconnect, which
+/// is how a multi-day catch-up proceeds. So an old stamp means "the strap has not been fully drained
+/// since then", and a green "History synced · 8 d ago" read as if all was well while a week of history
+/// was still on the strap. Past `freshSeconds` it is shown as a neutral fact ("Last full sync") in a
+/// warning tone instead. Pairing also outranks it: a link that has not finished bonding cannot sync,
+/// whatever happened days ago.
+enum SyncStatusPill: Equatable {
+    case syncing, noStrap, pairing, readyToSync
+    case synced(TimeInterval)
+    case lastFullSync(TimeInterval)
+
+    /// Periodic offloads run every 15 min (45 min when the strap is low), so a drained strap re-stamps
+    /// well within this; an older stamp while connected means it has not been drained since.
+    static let freshSeconds: TimeInterval = 3 * 3600
+
+    static func resolve(backfilling: Bool, connected: Bool, encryptedBond: Bool,
+                        lastSyncedAt: TimeInterval?, now: TimeInterval) -> SyncStatusPill {
+        if backfilling { return .syncing }
+        if !connected { return .noStrap }
+        if !encryptedBond { return .pairing }
+        guard let last = lastSyncedAt else { return .readyToSync }
+        return now - last <= freshSeconds ? .synced(last) : .lastFullSync(last)
     }
 }
 

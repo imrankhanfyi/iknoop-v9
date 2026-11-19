@@ -1390,7 +1390,50 @@ function wireGateForm(note) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Self-update. The tailnet file server sends no Cache-Control, so Safari (and especially a Home Screen
+// icon) may keep serving an old index.html — which then loads an old app.js that cannot read a newer
+// envelope and wrongly reports "check the passphrase" (2026-11-19). On every open, re-fetch the page
+// itself bypassing the cache (which also refreshes the cached copy), and if it names a different
+// app.js?v=N than the one running, reload once. The running version comes from this script's own URL,
+// so index.html's `app.js?v=N` stays the single source of truth.
+// ---------------------------------------------------------------------------
+const RUNNING_VIEWER_VERSION = (() => {
+  try { return new URL(document.currentScript.src).searchParams.get('v'); } catch (e) { return null; }
+})();
+const RELOADED_FOR_KEY = 'noopViewerReloadedFor';
+
+async function reloadIfNewerViewer() {
+  if (!RUNNING_VIEWER_VERSION) return false;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 3000);
+    const resp = await fetch(location.href.split('#')[0], { cache: 'reload', signal: ctl.signal });
+    clearTimeout(timer);
+    if (!resp.ok) return false;
+    const m = (await resp.text()).match(/app\.js\?v=([0-9A-Za-z._-]+)/);
+    if (!m || m[1] === RUNNING_VIEWER_VERSION) return false;
+    // At most one reload per target version, so a cache that refuses to update cannot loop.
+    if (sessionStorage.getItem(RELOADED_FOR_KEY) === m[1]) return false;
+    sessionStorage.setItem(RELOADED_FOR_KEY, m[1]);
+    location.reload();
+    return true;
+  } catch (e) { return false; }   // offline / timeout: carry on with what is loaded
+}
+
+// A Home Screen web app resumes from the background without reloading, so it would keep showing the
+// data (and page) from whenever it was last opened. After a while away, reload on return; with the key
+// remembered on this phone that is seamless. Only once unlocked, so a half-typed passphrase is never lost.
+const RESUME_RELOAD_AFTER_MS = 10 * 60 * 1000;
+let hiddenAt = null;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+  const unlocked = document.getElementById('app') && !document.getElementById('app').hidden;
+  if (hiddenAt && unlocked && Date.now() - hiddenAt > RESUME_RELOAD_AFTER_MS) location.reload();
+});
+
 async function init() {
+  if (await reloadIfNewerViewer()) return;
   let resp;
   try {
     resp = await fetch('noop-data.json', { cache: 'no-store' });

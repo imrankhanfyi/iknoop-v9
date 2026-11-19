@@ -76,7 +76,19 @@ lifestyle check-ins + effects); the Mac is an unattended collector. NOOP.app was
   v2 + "remember on this phone" deployed (viewer `app.js?v=5`, live viewer backed up as
   `/root/noop-backups/viewer-v2-*`); browser test passed in headless Chrome, Safari/iPhone reopen unconfirmed.
   NOOP stalled in "Pairing…" for ~80 min after a 09:01 reconnect (bond ack never came; quit and reopen
-  fixed it) — candidate fix: a timeout and retry for a stuck pairing in BLEManager. Lifestyle items (17) live in `~/Library/Application Support/noop-phone/items.json` —
+  fixed it). **Fixed and installed 11:40 the same day:**
+  - **WHOOP 4 bond watchdog** (`BLEManager.armBondWatchdog`): bounces a still-unbonded link after 30s,
+    backing off to 5 min, and never while reconnect is paused. Android already had `BOND_WATCHDOG_MS`.
+  - **Sync card** (`SyncStatusPill` in HealthView): "Pairing…" now outranks the last-sync stamp. A stamp
+    older than 3h shows "Last full sync", because `lastSyncedAt` is stamped only on HISTORY_COMPLETE.
+    Android is not mirrored: Imran has no Android device, so this fork skips Android parity.
+  - **Viewer self-update** (`app.js?v=6`): re-fetches index.html bypassing the cache and reloads once on
+    a version change. A Home Screen icon resumed after more than 10 min reloads.
+  - Rollback app: `~/Projects/NOOP-archive/installed-app-backup-2026-11-19` (the pre-fix build). It is
+    now the ONLY one: the 2026-11-04 backup was deleted with Imran's approval.
+  - **Unverified on hardware:** the watchdog's bounce path, since a lost ack can't be reproduced on demand.
+  - **Caution:** `xcodebuild test` launches a NOOP test host in the PRODUCTION container. It caused no
+    disruption on 2026-11-19, but prefer `-only-testing` runs that last seconds. Lifestyle items (17) live in `~/Library/Application Support/noop-phone/items.json` —
   never in git (medication names).
 - **Open — offload slowing:** on 2026-11-18 the gravity frontier advanced ~10× real time at 17:00, ~4–6× at
   17:20, ~2.7× by 17:57 (7-day backlog). Unexplained; if it holds, a closed-lid night takes far longer than
@@ -109,8 +121,9 @@ Nothing here is a NOOP.app change, so no Android twin and no migration is involv
 - `~/Projects/NOOP-archive/migration-backup-2026-07-17` — pre-migration container DB + v1.68 app.
 - ~~`~/Projects/NOOP-archive/pre-rebase-app-2026-07-18`~~ — deleted 2026-10-28 (disk cleanup), along with
   the 07-22/07-27/07-28 app-bundle copies; the git tag still marks the pre-rebase source state. Git safety tag for that state: `backup/pre-rebase-2026-07-18` (also on `personal`).
-- `~/Projects/NOOP-archive/installed-app-backup-2026-11-04` (94M) — the ONE rollback copy: the
-  Aug 18 14:59 build (pre-`6853aa17`) that was installed until 2026-11-04. Replace it, don't add beside it.
+- `~/Projects/NOOP-archive/installed-app-backup-2026-11-19` (94M) — the ONE rollback copy: the build
+  that was installed until the 2026-11-19 bond-watchdog install. It replaced the 2026-11-04 copy, which
+  was deleted. Replace it, don't add beside it.
 
 Claude Code memory lives under `~/.claude/projects/-Users-imrankhan-Projects-NOOP/` — now correctly
 keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). Launch Claude from here.

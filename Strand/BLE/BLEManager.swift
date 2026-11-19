@@ -624,6 +624,29 @@ public final class BLEManager: NSObject, ObservableObject {
     /// never silently dies. Started on bond, cancelled on disconnect.
     private var keepAliveTimer: DispatchSourceTimer?
     static let keepAliveIntervalSeconds = 30
+
+    /// WHOOP 4 bond watchdog. The keep-alive above only starts AFTER the bond, so a confirmed-write bond
+    /// whose ack never arrives (no error either) used to leave the link in "Pairing…" indefinitely:
+    /// live 0x2A37 HR keeps flowing, but history needs the bond, so nothing offloads. Observed on a fork
+    /// install: 80+ min stuck after re-attaching to an OS-held link; relaunching re-bonded at once.
+    /// Armed when the bond write goes out, cancelled on bond or disconnect; on expiry it bounces the link
+    /// so the normal reconnect path re-runs discovery and the bond write. Twin of Android's
+    /// `BOND_WATCHDOG_MS` / `onBondWatchdog`, with a longer first fuse so a macOS pairing prompt the user
+    /// is answering is never cut off, and an exponential backoff so a strap that truly can't bond is
+    /// not bounced in a tight loop.
+    private var bondWatchdogTimer: DispatchSourceTimer?
+    private var bondWatchdogBounces = 0
+
+    /// Fuse before the Nth consecutive bounce: 30s, 60s, 120s, 240s, then 300s thereafter.
+    nonisolated static func bondWatchdogFuseSeconds(consecutiveBounces: Int) -> Int {
+        min(30 << min(max(consecutiveBounces, 0), 4), 300)
+    }
+
+    /// Bounce only a link that is still up and still unbonded when the fuse expires, and never while
+    /// auto-reconnect is deliberately paused (the bond-loop / refusal give-up owns the link then).
+    nonisolated static func bondWatchdogShouldBounce(connected: Bool, didBond: Bool, reconnectPaused: Bool) -> Bool {
+        connected && !didBond && !reconnectPaused
+    }
     private var keepAliveTick = 0
     /// If a persisted/missing strap-family preference points at the wrong service, a service-filtered
     /// BLE scan can run forever even though the strap is nearby (the common "won't reconnect after an
@@ -2597,6 +2620,30 @@ public final class BLEManager: NSObject, ObservableObject {
         clearRebootState()   // clears the "Reconnecting…" pill → back to "Active · Live"
     }
 
+    private func armBondWatchdog(for p: CBPeripheral) {
+        cancelBondWatchdog()
+        let fuse = BLEManager.bondWatchdogFuseSeconds(consecutiveBounces: bondWatchdogBounces)
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + .seconds(fuse))
+        t.setEventHandler { [weak self, weak p] in
+            guard let self else { return }
+            self.cancelBondWatchdog()
+            guard let p, self.peripheral === p,
+                  BLEManager.bondWatchdogShouldBounce(connected: self.state.connected, didBond: self.didBond,
+                                                      reconnectPaused: self.autoReconnectPausedForBondLoop) else { return }
+            self.bondWatchdogBounces += 1
+            self.log("Bond handshake stuck for \(fuse)s (no confirmed-write ack) — bouncing link to retry (bounce \(self.bondWatchdogBounces))")
+            self.central.cancelPeripheralConnection(p)
+        }
+        t.resume()
+        bondWatchdogTimer = t
+    }
+
+    private func cancelBondWatchdog() {
+        bondWatchdogTimer?.cancel()
+        bondWatchdogTimer = nil
+    }
+
     private func startKeepAlive() {
         keepAliveTimer?.cancel()
         let s = BLEManager.keepAliveIntervalSeconds
@@ -3501,6 +3548,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         backfillTimer = nil
         keepAliveTimer?.cancel()
         keepAliveTimer = nil
+        cancelBondWatchdog()   // a fresh connection re-arms it at its own bond write
         resetCharacteristics()
         puffinRecorder.flush()   // persist any buffered puffin capture frames before reconnect
         puffinEventLog.close()   // release the event-log handle so the file is safe to export
@@ -3696,6 +3744,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 let bondFrame = WhoopCommand.getBatteryLevel.frame(seq: seq, payload: [0x00])
                 log("Bonding: confirmed write GET_BATTERY_LEVEL to 61080002")
                 peripheral.writeValue(Data(bondFrame), for: c, type: .withResponse)
+                armBondWatchdog(for: peripheral)
             case BLEManager.whoop5CmdWriteChar:
                 // EXPERIMENTAL WHOOP 5.0/MG: a 5/MG strap starts a session with the static CLIENT_HELLO
                 // frame, not the WHOOP4 confirmed-write bond. We write it UNacknowledged (it is a
@@ -3913,6 +3962,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
 
         if !didBond {
             didBond = true
+            cancelBondWatchdog()
+            bondWatchdogBounces = 0
             state.bonded = true
             state.encryptedBond = true   // WHOOP 4 confirmed-write bond is always genuine — #69
             bondedAt = Date()            // #617: start the bond→drop stopwatch for the bond-loop detector
