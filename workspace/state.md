@@ -67,7 +67,7 @@ lifestyle check-ins + effects); the Mac is an unattended collector. NOOP.app was
 
 - **Done:** Phase 0 (15-min frontier-triggered publish, gravity-keyed guard, safe failure reasons), Phase 1
   (4-tab viewer; v2 files + payload deployed to `/srv/noop-health` 2026-11-18, v1 backed up under
-  `/root/noop-backups/viewer-v1-*`), Phase 2 server half (`receiver/`, live at `:8444/inbox`).
+  `/root/noop-backups/viewer-v1-*`; that backup was deleted 2026-11-19, superseded by `viewer-v2-*`), Phase 2 server half (`receiver/`, live at `:8444/inbox`).
 - **LaunchAgent re-enabled 2026-11-18 17:57** (was paused during Phase 2); wrapper now passes
   `--max-age-hours 240`. First real v2 publish: `bytes=69731 frontier=1794446844`.
 - **Phases 2 and 3 deployed 2026-11-18** (checklist + workout edits via the inbox; Effects via vendored
