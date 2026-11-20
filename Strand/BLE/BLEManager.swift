@@ -647,6 +647,28 @@ public final class BLEManager: NSObject, ObservableObject {
     nonisolated static func bondWatchdogShouldBounce(connected: Bool, didBond: Bool, reconnectPaused: Bool) -> Bool {
         connected && !didBond && !reconnectPaused
     }
+
+    /// What to do when the Mac wakes from sleep. See `wakeRecoveryPlan`.
+    struct WakeRecoveryPlan: Equatable {
+        var endStaleBackfill = false
+        var bounceUnbondedLink = false
+        var kickSync = false
+    }
+
+    /// A backfill with no frame for longer than this at wake time is treated as dead.
+    nonisolated static let wakeStaleBackfillSeconds: Double = 60
+
+    /// Pure post-wake decision. Disconnected links are left to the existing reconnect logic.
+    nonisolated static func wakeRecoveryPlan(connected: Bool, encryptedBond: Bool, backfilling: Bool,
+                                             secondsSinceLastBackfillFrame: Double?) -> WakeRecoveryPlan {
+        guard connected else { return WakeRecoveryPlan() }
+        guard encryptedBond else { return WakeRecoveryPlan(bounceUnbondedLink: true) }
+        if backfilling {
+            if let s = secondsSinceLastBackfillFrame, s <= wakeStaleBackfillSeconds { return WakeRecoveryPlan() }
+            return WakeRecoveryPlan(endStaleBackfill: true, kickSync: true)
+        }
+        return WakeRecoveryPlan(kickSync: true)
+    }
     private var keepAliveTick = 0
     /// If a persisted/missing strap-family preference points at the wrong service, a service-filtered
     /// BLE scan can run forever even though the strap is nearby (the common "won't reconnect after an
@@ -780,6 +802,13 @@ public final class BLEManager: NSObject, ObservableObject {
     /// @j0b-dev's PR #20.)
     private lazy var puffinRecorder = PuffinFrameRecorder(state: state)
     private lazy var puffinEventLog = PuffinEventLog()
+    /// Always-on persistent copy of the strap log (survives relaunch).
+    private lazy var strapLogFile = StrapLogFile()
+    /// Wall-clock time of the last backfill frame (or session start); used by the wake check.
+    private var lastBackfillFrameWallAt: Date?
+    #if os(macOS)
+    private var wakeObserver: NSObjectProtocol?
+    #endif
 
     /// Durable log of the WHOOP 5/MG high-rate R22 deep buffers (type-0x2F ≥ 1 KB) for #423 reverse-
     /// engineering. Gated on the same capture toggle; no-op otherwise.
@@ -959,6 +988,9 @@ public final class BLEManager: NSObject, ObservableObject {
     }
 
     deinit {
+        #if os(macOS)
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        #endif
         securePairRetryWorkItem?.cancel()
         securePairRetryWorkItem = nil
         securePairRetryCount = 0
@@ -1089,6 +1121,7 @@ public final class BLEManager: NSObject, ObservableObject {
         router.onSyncTrigger = { [weak self] in self?.requestSync(.strap) }
         // #78 hole-4: a paused-for-bond-loop strap gets one bounded salvage attempt per app-foreground.
         installForegroundSalvageProbe()
+        installWakeObserver()
     }
 
     // MARK: Public API
@@ -1694,6 +1727,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // "no banked history / charge to 100%". A fresh offload (count 0) keeps the honest guidance.
         backfiller.begin(family: selectedModel.deviceFamily, continuedAfterRows: consecutiveAutoContinues > 0)
         backfilling = true
+        lastBackfillFrameWallAt = Date()
         state.backfilling = true
         state.syncChunksThisSession = 0
         state.rejectedFramesThisSession = 0
@@ -1717,6 +1751,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// synchronously (delegate order) and drained sequentially in small slices, so START /
     /// data / END chunk assembly is never reordered while the UI still gets time to paint.
     private func routeBackfillFrame(_ frame: [UInt8]) {
+        lastBackfillFrameWallAt = Date()
         backfillFrameQueue.append(frame)
         guard !backfillDraining else { return }
         backfillDraining = true
@@ -1779,12 +1814,61 @@ public final class BLEManager: NSObject, ObservableObject {
     private func armBackfillTimeout() {
         backfillTimeout?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.backfiller?.timeoutFired()
-            self.exitBackfilling(reason: "timeout")
+            self?.fireBackfillIdleTimeout()
         }
         backfillTimeout = item
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(BLEManager.backfillIdleTimeoutSeconds), execute: item)
+    }
+
+    /// Idle-timeout body, also used by the post-wake check to end a dead session.
+    private func fireBackfillIdleTimeout() {
+        backfillTimeout?.cancel()
+        backfillTimeout = nil
+        backfiller?.timeoutFired()
+        exitBackfilling(reason: "timeout")
+    }
+
+    /// Register once for the macOS system-wake notification (no-op elsewhere).
+    private func installWakeObserver() {
+        #if os(macOS)
+        guard wakeObserver == nil else { return }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.log("System wake — scheduling wake check in 8s")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                    self?.handleSystemWake()
+                }
+            }
+        }
+        #endif
+    }
+
+    /// Re-validate the link after the Mac wakes: end a dead offload, bounce an unbonded link, kick a sync.
+    private func handleSystemWake() {
+        let age = lastBackfillFrameWallAt.map { Date().timeIntervalSince($0) }
+        let plan = BLEManager.wakeRecoveryPlan(connected: state.connected, encryptedBond: state.encryptedBond,
+                                               backfilling: backfilling, secondsSinceLastBackfillFrame: age)
+        let ageText = age.map { String(format: "%.0f", $0) } ?? "nil"
+        log("Wake check: connected=\(state.connected) encryptedBond=\(state.encryptedBond) backfilling=\(backfilling) lastBackfillFrameAge=\(ageText)s bondLoopPaused=\(autoReconnectPausedForBondLoop) handshakeDone=\(connectHandshakeDone) → plan endStale=\(plan.endStaleBackfill) bounce=\(plan.bounceUnbondedLink) kick=\(plan.kickSync)")
+        if plan.endStaleBackfill {
+            log("Wake check: offload session stale — ending it")
+            fireBackfillIdleTimeout()
+        }
+        if plan.bounceUnbondedLink, let p = peripheral {
+            // Mirror the existing clear sites so the didDisconnect handler schedules the rescan.
+            if autoReconnectPausedForBondLoop {
+                bondGiveUp.reset()
+                autoReconnectPausedForBondLoop = false
+                bondLoopPausedAt = nil
+            }
+            log("Wake check: link up but not bonded — bouncing connection")
+            central.cancelPeripheralConnection(p)
+        }
+        if plan.kickSync {
+            requestSync(.manual)
+        }
     }
 
     /// Tear down the backfill session. Does NOT auto-start live HR: the periodic type-47 backfill
@@ -2831,7 +2915,9 @@ public final class BLEManager: NSObject, ObservableObject {
     }()
 
     private func log(_ s: String) {
-        state.append(log: "[\(timestamp())] \(s)")
+        let line = "[\(timestamp())] \(s)"
+        state.append(log: line)
+        strapLogFile.append(line)
     }
     private func timestamp() -> String {
         BLEManager.logTimeFormatter.string(from: Date())
