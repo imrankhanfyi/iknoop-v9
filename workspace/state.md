@@ -90,10 +90,35 @@ lifestyle check-ins + effects); the Mac is an unattended collector. NOOP.app was
   - **Caution:** `xcodebuild test` launches a NOOP test host in the PRODUCTION container. It caused no
     disruption on 2026-11-19, but prefer `-only-testing` runs that last seconds. Lifestyle items (17) live in `~/Library/Application Support/noop-phone/items.json` —
   never in git (medication names).
+- **2026-11-20: "slow sync" was really sleep plus a post-wake stall; wake check and persistent log installed.**
+  - **Lid closed = no offload.** `pmset -g log` shows `Clamshell Sleep` at 14:10:02 on 11-19, and the gravity
+    frontier stopped at that moment. Overnight Bluetooth DarkWakes (~80/h) kept live HR landing, so it
+    *looked* on. While awake the offload ran at 14–19×, so throughput is not the problem.
+  - **The bug:** after the 09:39 wake on 11-20, the link stayed up and unchanged but no history came for
+    ~55 min. The Sync button was greyed out, and a relaunch fixed it. The 11-19 09:01 stall has the
+    same signature. The cause was never captured, because the strap log was in-memory only.
+  - **Fix 1 — `StrapLogFile`:** every `BLEManager.log` line is also written to the container's
+    `Application Support/OpenWhoop/strap-log.txt` (rotates to `.1` at 1 MB). Read this file instead of
+    asking Imran for screenshots.
+  - **Fix 2 — wake check** (`BLEManager.handleSystemWake`, macOS `didWakeNotification` + 8s). It ends a
+    sync with no frame for >60s wall time, bounces a connected-but-unbonded link (clearing the bond-loop
+    pause), and kicks `requestSync(.manual)`. It always logs `Wake check: …` with the link state.
+  - Installed 10:58. Rollback copy: `~/Projects/NOOP-archive/installed-app-backup-2026-11-20` (the 11-19
+    bond-watchdog build). It replaced the 11-19 copy.
+  - **Unverified on hardware:** the wake check. **Next pickup:** after the next lid-close and wake, grep
+    `strap-log.txt` for `Wake check:`. If a stall recurs, the line shows which flag was stuck. If it shows
+    `bondLoopPaused=true` on a fresh link, do the deferred fix 3: don't carry an overnight bond-loop pause
+    into a new connection.
+  - **Caution:** `xcodebuild test` (`CODE_SIGNING_ALLOWED=NO`) runs an *unsandboxed* test host. It attached
+    to the live strap link 3× and wrote to the non-container `~/Library/Application Support/OpenWhoop/`.
+    The offload survived.
+  - The Live Body Console's "LAST SYNC 1 wk. ago" is `lastSyncedAt` (last HISTORY_COMPLETE, 11-10 20:09).
+    It was not relabelled like the Health pill (small optional fix).
 - **Open — offload slowing:** on 2026-11-18 the gravity frontier advanced ~10× real time at 17:00, ~4–6× at
-  17:20, ~2.7× by 17:57 (7-day backlog). Unexplained; if it holds, a closed-lid night takes far longer than
-  the ~1 h Imran accepted. Measure a normal morning; if still slow, instrument chunk-received→ack timing
-  in `Strand/Collect/Backfiller.swift` before changing anything. The store has no `dailyMetric` rows between 2026-08-26 and 2026-11-04.
+  17:20, ~2.7× by 17:57 (7-day backlog). **Mostly answered 2026-11-20:** measured rates are 14–19× when
+  awake and connected; the long delays were stalls and lid-closed sleep (above). The 11-18 2.7× figure
+  may itself have been a stall. Instrument chunk→ack timing in `Strand/Collect/Backfiller.swift` only if
+  a normal awake catch-up measures well under ~10×. The store has no `dailyMetric` rows between 2026-08-26 and 2026-11-04.
 
 Nothing here is a NOOP.app change, so no Android twin and no migration is involved.
 
@@ -105,7 +130,10 @@ Nothing here is a NOOP.app change, so no Android twin and no migration is involv
 - **Two permanent local patches** (ride the rebase stack forever — see `CLAUDE.md` banner):
   1. Strip `com.apple.security.network.client` → OS sandbox hard-blocks all egress.
   2. Production identity `com.noopapp.noop` / `NOOP` (upstream ships this fork as `.staging`).
-- **Installed build:** `/Applications/NOOP.app` = Release build of `edbf4660` (code through
+- **Installed build (current):** the 2026-11-20 wake-check + strap-log build (binary mtime Nov 20 10:58;
+  see the 2026-11-20 entry above). The text below describes the 2026-11-04 install and is kept for its
+  version-string notes.
+- **Installed build (2026-11-04):** `/Applications/NOOP.app` = Release build of `edbf4660` (code through
   `6853aa17`, incl. migration `v31-sleep-detected-end`) ditto'd 2026-11-04 (binary mtime
   Nov 4 11:50). About shows "9.0.1 (198)" for EVERY macOS build — `project.yml` hardcodes the Strand
   target's `CFBundleVersion: "198"` — so identify a build by binary mtime or a `grep -c` for a
@@ -121,9 +149,9 @@ Nothing here is a NOOP.app change, so no Android twin and no migration is involv
 - `~/Projects/NOOP-archive/migration-backup-2026-07-17` — pre-migration container DB + v1.68 app.
 - ~~`~/Projects/NOOP-archive/pre-rebase-app-2026-07-18`~~ — deleted 2026-10-28 (disk cleanup), along with
   the 07-22/07-27/07-28 app-bundle copies; the git tag still marks the pre-rebase source state. Git safety tag for that state: `backup/pre-rebase-2026-07-18` (also on `personal`).
-- `~/Projects/NOOP-archive/installed-app-backup-2026-11-19` (94M) — the ONE rollback copy: the build
-  that was installed until the 2026-11-19 bond-watchdog install. It replaced the 2026-11-04 copy, which
-  was deleted. Replace it, don't add beside it.
+- `~/Projects/NOOP-archive/installed-app-backup-2026-11-20` (94M) — the ONE rollback copy: the 2026-11-19
+  bond-watchdog build, installed until the 2026-11-20 wake-check install. It replaced the 2026-11-19 copy,
+  which was deleted. Replace it, don't add beside it.
 
 Claude Code memory lives under `~/.claude/projects/-Users-imrankhan-Projects-NOOP/` — now correctly
 keyed to THIS repo (the active folder is named `NOOP` again after the cleanup). Launch Claude from here.
